@@ -1,132 +1,46 @@
-<h2>Open WebUI</h2>
+# Open WebUI CK
 
-<p>Open WebUI is <a href="https://docs.openwebui.com/"><strong>a home for AI</strong></a>: an extensible, easy-to-use, self-hosted platform built to run entirely offline. Connect local models through Ollama or use OpenAI-compatible APIs for local and cloud models.</p>
+个人自用的 Open WebUI 深度定制版。个人仓库、反馈和源码下载入口：[someone97421/open-webui-CK](https://github.com/someone97421/open-webui-CK)。不向上游贡献，不使用上游公开包或容器替代本地定制构建。
 
-[English](README.md) |
-[简体中文](README.zh.md) |
-[繁體中文](README.zht.md) |
-[한국어](README.ko.md) |
-[Deutsch](README.de.md) |
-[Español](README.es.md) |
-[Français](README.fr.md) |
-[Italiano](README.it.md) |
-[Dansk](README.da.md) |
-[日本語](README.ja.md) |
-[Polski](README.pl.md) |
-[Русский](README.ru.md) |
-[Bosanski](README.bs.md) |
-[العربية](README.ar.md) |
-[Norsk](README.no.md) |
-[Português (Brasil)](README.br.md) |
-[ไทย](README.th.md) |
-[Türkçe](README.tr.md) |
-[Українська](README.uk.md) |
-[বাংলা](README.bn.md) |
-[Ελληνικά](README.gr.md) |
-[Tiếng Việt](README.vi.md)
+开发规则与完整环境速查见 [AGENTS.md](AGENTS.md)，上游同步基线与追踪表见 [docs/UPSTREAM_SYNC.md](docs/UPSTREAM_SYNC.md)，初始化盘点与清理记录见 [docs/INITIALIZATION.md](docs/INITIALIZATION.md)。上游旧文档已归档到 [docs/archive/upstream/](docs/archive/upstream/说明.md)，仅作历史参考字典，无需遵守其中的社区流程。
 
-[![Open WebUI Demo](https://cdn.openwebui.com/open-webui-demo.gif)](https://docs.openwebui.com/)
+## 本地开发
 
-![GitHub stars](https://img.shields.io/github/stars/open-webui/open-webui?style=social)
-![GitHub forks](https://img.shields.io/github/forks/open-webui/open-webui?style=social)
-![GitHub watchers](https://img.shields.io/github/watchers/open-webui/open-webui?style=social)
-![GitHub repo size](https://img.shields.io/github/repo-size/open-webui/open-webui)
-![GitHub language count](https://img.shields.io/github/languages/count/open-webui/open-webui)
-![GitHub top language](https://img.shields.io/github/languages/top/open-webui/open-webui)
-![GitHub last commit](https://img.shields.io/github/last-commit/open-webui/open-webui?color=red)
-[![Discord](https://img.shields.io/badge/Discord-Open_WebUI-blue?logo=discord&logoColor=white)](https://discord.gg/5rJgQTnV4s)
-[![](https://img.shields.io/static/v1?label=Sponsor&message=Support&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/open-webui)
+使用 Node.js 22 / npm 和 Python 3.12（支持 3.11–3.12）。以下是 Windows PowerShell 命令，安装后在两个独立可见终端运行前后端。
 
-[Explore Open WebUI →](https://docs.openwebui.com/)
-
-### Installation
-
-#### Python
-
-Requires Python 3.12.
-
-```bash
-pip install open-webui
-open-webui serve
+```powershell
+npm ci --force
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements.txt
+Copy-Item .env.example .env
 ```
 
-Then open [http://localhost:8080](http://localhost:8080).
+编辑 `.env` 中的本地连接信息；已有 `.env` 时保留原文件，不重复复制。
 
-#### Docker
+前端终端，在仓库根目录执行：
 
-```bash
-docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:main
+```powershell
+npm run dev
 ```
 
-Then open [http://localhost:3000](http://localhost:3000).
+后端终端，从仓库根目录进入后端：
 
-| Image tag | Includes                                                                                 |
-| --------- | ---------------------------------------------------------------------------------------- |
-| `:main`   | Standard image with local AI dependencies                                                |
-| `:slim`   | Lightweight image using external services for embeddings, document extraction, and voice |
-| `:cuda`   | Open WebUI with CUDA acceleration                                                        |
-| `:ollama` | Open WebUI bundled with Ollama                                                           |
-| `:dev`    | Latest development build                                                                 |
+```powershell
+Set-Location backend
+..\.venv\Scripts\python.exe -m uvicorn open_webui.main:app --host 127.0.0.1 --port 8080 --reload
+```
 
-Add these options to `docker run` before the image name as needed:
+前端默认端口 5173，代理后端 8080；自定义后端地址用 `WEBUI_BACKEND_URL`。Shell 脚本在 WSL 中运行。
 
-| Option                                               | Purpose                                                                                  |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `-e OLLAMA_BASE_URL=http://your-ollama-server:11434` | Connect to Ollama on another server                                                      |
-| `-e OPENAI_API_KEY=your_secret_key`                  | Set your OpenAI API key                                                                  |
-| `-e HF_HUB_OFFLINE=1`                                | Disable Hugging Face model downloads for offline use                                     |
-| `--gpus all`                                         | Enable Nvidia GPU access for `:cuda` or `:ollama`; requires the Nvidia Container Toolkit |
+## 本地构建
 
-See the [Docker installation guide](https://docs.openwebui.com/getting-started/quick-start/) for setup instructions and configuration options.
+- 前端：`npm run build`，先校验加密 WASM 并准备 Pyodide，产物在 `build/`。
+- 容器：`docker build -t open-webui-ck:local .` 或 `docker compose build open-webui`。Compose 使用本地镜像，启动前须完成构建。
+- 数据：`backend/data/` 或 Docker 的 `open-webui` 卷；更换环境前备份，勿提交私人数据与 `.env`。
+- 验证：默认按需手动执行；GitHub Actions 仅保留手动触发的基础验证，不发布包或镜像。
 
-#### Desktop App
+自动版本检查及对外遥测已禁用，插件市场、模型资源下载与本地业务统计保留。可选企业许可证校验和自定义品牌服务仍按原有显式配置运行，详见初始化记录。
 
-[Download the native desktop app](https://github.com/open-webui/desktop) for macOS, Windows, and Linux.
+## 许可
 
-[Read the docs →](https://docs.openwebui.com/getting-started/)
-
-### Ecosystem
-
-- [Open Terminal](https://github.com/open-webui/open-terminal) / [Terminals (Enterprise)](https://github.com/open-webui/terminals): The action layer that turns Open WebUI into a full agent harness, with enterprise orchestration for per-user workspaces.
-- [Knowledge Base Sync (oikb)](https://github.com/open-webui/oikb): Mirror folders, repos, buckets, and wikis into Open WebUI Knowledge Bases with incremental sync.
-- [Open WebUI Computer](https://github.com/open-webui/computer): Your computer in any browser: files, editor, terminal, git, and optional AI agents, running on your real machine.
-
-See the [ecosystem documentation](https://docs.openwebui.com/ecosystem/) for details.
-
-### Troubleshooting and Updates
-
-See the [troubleshooting guide](https://docs.openwebui.com/troubleshooting/) for connection issues and the [updating guide](https://docs.openwebui.com/getting-started/updating) to update your installation.
-
-### Documentation
-
-See the [docs](https://docs.openwebui.com/) for configuration and usage, and the [roadmap](https://docs.openwebui.com/roadmap/) for planned work.
-
-For Docker Compose, Kubernetes, and other setups, see the [installation docs](https://docs.openwebui.com/getting-started/).
-
-### Support
-
-[Open an issue](https://github.com/open-webui/open-webui/issues) or [start a discussion](https://github.com/open-webui/open-webui/discussions).
-
-Find us on [Reddit](https://www.reddit.com/r/OpenWebUI/), [X](https://x.com/OpenWebUI), and [Discord](https://discord.gg/5rJgQTnV4s).
-
-### Security
-
-Report vulnerabilities privately through [GitHub security advisories](https://github.com/open-webui/open-webui/security). Security reports are accepted only through GitHub.
-
-### Star History
-
-<a href="https://star-history.com/#open-webui/open-webui&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=open-webui/open-webui&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=open-webui/open-webui&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=open-webui/open-webui&type=Date" />
-  </picture>
-</a>
-
-#### License
-
-Includes code under the Open WebUI License, which requires preserving the Open WebUI branding, and prior contributions under their original licenses. See [LICENSE](./LICENSE) and [LICENSE_HISTORY](./LICENSE_HISTORY) for terms and history.
-
-[Enterprise](https://docs.openwebui.com/enterprise) · [Careers](https://careers.openwebui.com/) · [Sponsor](https://github.com/sponsors/open-webui)
-
-Created by [Timothy Jaeryang Baek](https://github.com/tjbck).
+保留 [LICENSE](LICENSE)、[LICENSE_HISTORY](LICENSE_HISTORY)、[LICENSE_NOTICE](LICENSE_NOTICE) 和资源内第三方许可。根许可证提及的上游贡献者协议原文见 [历史归档](docs/archive/upstream/CONTRIBUTOR_LICENSE_AGREEMENT)；当前开发遵循本仓库规则。

@@ -34,12 +34,12 @@
 						<br class=" " />
 						<a
 							class=" font-normal underline"
-							href="https://github.com/open-webui/open-webui#how-to-install-"
+							href="https://github.com/someone97421/open-webui-CK#本地开发"
 							target="_blank">{$i18n.t('See readme.md for instructions')}</a
 						>
 						{$i18n.t('or')}
-						<a class=" font-normal underline" href="https://discord.gg/5rJgQTnV4s" target="_blank"
-							>{$i18n.t('join our Discord for help.')}</a
+						<a class=" font-normal underline" href="https://github.com/someone97421/open-webui-CK/issues" target="_blank"
+							>{$i18n.t('Feedback')}</a
 						>
 					</div>
 

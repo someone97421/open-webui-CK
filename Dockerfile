@@ -94,7 +94,9 @@ ENV OPENAI_API_KEY="" \
     WEBUI_SECRET_KEY="" \
     SCARF_NO_ANALYTICS=true \
     DO_NOT_TRACK=true \
-    ANONYMIZED_TELEMETRY=false
+    ANONYMIZED_TELEMETRY=false \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    OTEL_SDK_DISABLED=true
 
 #### Other models #########################################################
 ## whisper TTS model settings ##

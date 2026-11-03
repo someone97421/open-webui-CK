@@ -39,6 +39,14 @@ try:
 except ImportError:
     print('dotenv not installed, skipping...')
 
+os.environ.update(
+    SCARF_NO_ANALYTICS='true',
+    DO_NOT_TRACK='true',
+    ANONYMIZED_TELEMETRY='false',
+    HF_HUB_DISABLE_TELEMETRY='1',
+    OTEL_SDK_DISABLED='true',
+)
+
 DOCKER = os.getenv('DOCKER', 'False').lower() == 'true'
 USE_SLIM = os.getenv('USE_SLIM_DOCKER', 'False').lower() == 'true'
 
@@ -1195,7 +1203,7 @@ PIP_PACKAGE_INDEX_OPTIONS = os.getenv('PIP_PACKAGE_INDEX_OPTIONS', '').split()
 
 # OFFLINE_MODE
 
-ENABLE_VERSION_UPDATE_CHECK = os.getenv('ENABLE_VERSION_UPDATE_CHECK', 'true').lower() == 'true'
+ENABLE_VERSION_UPDATE_CHECK = False
 OFFLINE_MODE = os.getenv('OFFLINE_MODE', 'false').lower() == 'true'
 
 if OFFLINE_MODE:
@@ -1252,10 +1260,10 @@ ENABLE_AUDIT_GET_REQUESTS = os.getenv('ENABLE_AUDIT_GET_REQUESTS', 'False').lowe
 
 # OpenTelemetry
 
-ENABLE_OTEL = os.getenv('ENABLE_OTEL', 'False').lower() == 'true'
-ENABLE_OTEL_TRACES = os.getenv('ENABLE_OTEL_TRACES', 'False').lower() == 'true'
-ENABLE_OTEL_METRICS = os.getenv('ENABLE_OTEL_METRICS', 'False').lower() == 'true'
-ENABLE_OTEL_LOGS = os.getenv('ENABLE_OTEL_LOGS', 'False').lower() == 'true'
+ENABLE_OTEL = False
+ENABLE_OTEL_TRACES = False
+ENABLE_OTEL_METRICS = False
+ENABLE_OTEL_LOGS = False
 
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://localhost:4317')
 OTEL_METRICS_EXPORTER_OTLP_ENDPOINT = os.getenv('OTEL_METRICS_EXPORTER_OTLP_ENDPOINT', OTEL_EXPORTER_OTLP_ENDPOINT)

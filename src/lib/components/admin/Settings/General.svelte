@@ -153,7 +153,7 @@
 									>
 								{:else}
 									<a
-										href="https://github.com/open-webui/open-webui/releases/tag/v{version.latest}"
+										href="https://github.com/someone97421/open-webui-CK/releases"
 										target="_blank"
 										class="text-gray-500 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300"
 									>
@@ -217,17 +217,12 @@
 					<div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-gray-400 dark:text-gray-600">
 						<a
 							class="hover:text-gray-700 dark:hover:text-gray-300"
-							href="https://discord.gg/5rJgQTnV4s"
-							target="_blank">Discord</a
+							href="https://github.com/someone97421/open-webui-CK/issues"
+							target="_blank">{$i18n.t('Feedback')}</a
 						>
 						<a
 							class="hover:text-gray-700 dark:hover:text-gray-300"
-							href="https://twitter.com/OpenWebUI"
-							target="_blank">X</a
-						>
-						<a
-							class="hover:text-gray-700 dark:hover:text-gray-300"
-							href="https://github.com/open-webui/open-webui"
+							href="https://github.com/someone97421/open-webui-CK"
 							target="_blank">GitHub</a
 						>
 					</div>

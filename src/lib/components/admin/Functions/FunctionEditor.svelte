@@ -122,9 +122,8 @@
 	let starterType = 'filter';
 	const filterBoilerplate = `"""
 title: Example Filter
-author: open-webui
-author_url: https://github.com/open-webui
-funding_url: https://github.com/open-webui
+author: someone97421
+author_url: https://github.com/someone97421/open-webui-CK
 version: 0.1
 """
 
@@ -198,9 +197,8 @@ class Filter:
 `;
 	const eventBoilerplate = `"""
 title: Example Event
-author: open-webui
-author_url: https://github.com/open-webui
-funding_url: https://github.com/open-webui
+author: someone97421
+author_url: https://github.com/someone97421/open-webui-CK
 version: 0.1
 """
 

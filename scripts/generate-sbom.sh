@@ -103,7 +103,7 @@ print(f'  Timestamp: {data.get(\"metadata\", {}).get(\"timestamp\", \"none\")}')
 }
 
 generate_docker() {
-    local IMAGE="${1:-ghcr.io/open-webui/open-webui:latest}"
+    local IMAGE="${1:-open-webui-ck:local}"
     info "Generating SBOM from Docker image: $IMAGE"
 
     if ! command -v syft &>/dev/null; then
@@ -111,7 +111,7 @@ generate_docker() {
         exit 1
     fi
 
-    dim "Pulling and scanning image..."
+    dim "Scanning local image..."
     syft scan "docker:$IMAGE" \
         --output "cyclonedx-json=$OUTPUT" \
         --quiet
