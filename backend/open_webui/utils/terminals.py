@@ -319,7 +319,7 @@ async def upload_files_to_terminal(request, user, files: list[dict], metadata: d
 async def get_terminal_agents_md(request, user, metadata: dict, extra_params: dict | None = None) -> str | None:
     """Load the selected terminal user's home AGENTS.md afresh for this turn."""
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(45):
             data = await get_terminal_json(request, user, metadata, '/files/cwd', extra_params)
             home = data.get('home') if isinstance(data, dict) else None
             if not isinstance(home, str) or not (posixpath.isabs(home) or ntpath.isabs(home)):

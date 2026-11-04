@@ -1372,7 +1372,7 @@ async def get_terminal_cwd(
     try:
         cwd_url = f'{base_url.rstrip("/")}/files/cwd'
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=5),
+            timeout=aiohttp.ClientTimeout(total=45, connect=5),
             trust_env=True,
         ) as session:
             async with session.get(
@@ -1380,7 +1380,8 @@ async def get_terminal_cwd(
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return data.get('cwd')
+                    cwd = data.get('cwd') if isinstance(data, dict) else None
+                    return cwd if isinstance(cwd, str) and cwd.strip() else None
     except Exception as e:
         log.debug('Failed to fetch terminal CWD: %s', e)
     return None
@@ -1400,7 +1401,7 @@ async def get_terminal_system_prompt(
     base = base_url.rstrip('/')
     try:
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=3),
+            timeout=aiohttp.ClientTimeout(total=45, connect=5),
             trust_env=True,
         ) as session:
             # 1. Check feature flag
@@ -1600,8 +1601,32 @@ async def get_terminal_tools(
         )
     else:
         system_prompt = await get_terminal_system_prompt(server_data['url'], headers, cookies)
-    if not system_prompt:
+    if not system_prompt and not (session_id or context_id):
         system_prompt = server_data.get('system_prompt')
+
+    file_tool_names = {
+        'read_file', 'write_file', 'replace_file_content', 'display_file', 'upload_file',
+        'list_files', 'grep_search', 'match_files', 'search_files', 'glob_search',
+    }
+    directory_hint = (
+        'Use paths relative to this session working directory for workspace files. '
+        'Do not assume /mnt/data exists or is writable; use the reported directory or run pwd when unknown.'
+    )
+    if terminal_cwd:
+        directory_hint = f'Current session working directory: {json.dumps(terminal_cwd, ensure_ascii=False)}. ' + directory_hint
+    tool_names = {spec['name'] for spec in specs}
+    guidance = [directory_hint]
+    if 'write_file' in tool_names:
+        guidance.append('Prefer write_file for text-file creation; it handles paths and quoting directly.')
+    if 'replace_file_content' in tool_names:
+        guidance.append('Prefer replace_file_content for targeted text edits.')
+    if 'run_command' in tool_names:
+        guidance.append(
+            'Check command -v before using optional shell utilities such as apply_patch. '
+            'If unavailable, switch to the provided file tools. A process ID or empty output is not proof of success; '
+            'wait for completion and inspect the exit code and expected output before reporting success.'
+        )
+    system_prompt = '\n\n'.join(part for part in (system_prompt, ' '.join(guidance)) if part)
 
     tools_dict = {}
     for spec in specs:
@@ -1610,10 +1635,8 @@ async def get_terminal_tools(
             get_builtin_tool_spec(display_file) if function_name == 'display_file' else spec
         )
 
-        if function_name == 'run_command' and terminal_cwd:
-            tool_spec['description'] = (
-                tool_spec.get('description', '') + f'\n\nThe current working directory is: {terminal_cwd}'
-            )
+        if function_name == 'run_command' or function_name in file_tool_names:
+            tool_spec['description'] = tool_spec.get('description', '') + f'\n\n{directory_hint}'
 
         async def make_tool_function(fn_name, srv_data, hdrs, cks):
             async def tool_function(**kwargs):

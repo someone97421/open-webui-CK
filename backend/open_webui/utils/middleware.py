@@ -313,7 +313,13 @@ def build_terminal_file_tool_result(
     if isinstance(tool_result, (list, tuple)) and tool_result and isinstance(tool_result[0], dict):
         tool_result = tool_result[0]
 
-    if tool_function_name != 'display_file' or not isinstance(tool_result, dict) or tool_result.get('exists') is False:
+    if (
+        tool_function_name != 'display_file'
+        or not isinstance(tool_result, dict)
+        or tool_result.get('exists') is not True
+        or tool_result.get('error')
+        or tool_result.get('source') == 'open_webui'
+    ):
         return None
 
     tool_id = (tool or {}).get('tool_id', '')
@@ -336,6 +342,8 @@ def build_terminal_file_tool_result(
         'source': 'open_terminal',
         'exists': True,
         'displayed': tool_function_params.get('inline') is True,
+        'display_mode': 'inline' if tool_function_params.get('inline') is True else 'viewer',
+        'display_note': 'displayed 仅表示正文内联模式；侧栏预览使用独立事件，该字段不是客户端渲染确认。',
         'terminal_selector': terminal_selector,
         **({'terminal_id': terminal_id} if terminal_id else {}),
         **({'terminal_url': server_url} if server_url and not terminal_id else {}),
@@ -977,7 +985,7 @@ async def terminal_event_handler(
         if not path:
             return
         # Only open the viewer for existing files that are not displayed inline.
-        if result.get('exists') is False or result.get('displayed') is True:
+        if result.get('exists') is not True or result.get('error') or result.get('displayed') is True:
             return
         page = tool_function_params.get('page')
 
