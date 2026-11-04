@@ -3,6 +3,7 @@
 	import { LinkPreview } from 'bits-ui';
 	import { getFolderById, getSharedFolderChats } from '$lib/apis/folders';
 	import { models } from '$lib/stores';
+	import { isProjectFolder } from '$lib/utils/projects';
 	import Emoji from '$lib/components/common/Emoji.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import FolderIcon from './icons/Folder.svelte';
@@ -106,7 +107,7 @@
 					on:click={onEdit}
 				>
 					<EditPencil className="size-3.5 text-gray-500 dark:text-gray-400" />
-					{$i18n.t('Edit Folder')}
+					{isProjectFolder(folder) ? '编辑项目' : $i18n.t('Edit Folder')}
 				</button>
 			</div>
 		{/if}

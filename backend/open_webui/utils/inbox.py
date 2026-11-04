@@ -127,6 +127,10 @@ async def resource_queries(user, db):
         shared = select(SharedChat.chat_id).where(
             SharedChat.chat['share_mode'].as_string() == 'continue', grant('shared_chat', SharedChat.chat_id)
         )
+        foreign_projects = select(Folder.id).where(
+            not admin, Folder.user_id != user.id,
+            Folder.data['project']['version'].as_integer() == 1,
+        )
         queries['chat'] = select(chat.id).where(
             or_(
                 chat.user_id == user.id,
@@ -135,6 +139,9 @@ async def resource_queries(user, db):
                 chat.id.in_(shared),
                 chat.folder_id.in_(select(folders.c.id)),
             )
+        )
+        queries['chat'] = queries['chat'].where(
+            or_(chat.folder_id.is_(None), chat.folder_id.not_in(foreign_projects))
         )
     if await enabled('channels'):
         channel = models['channel']

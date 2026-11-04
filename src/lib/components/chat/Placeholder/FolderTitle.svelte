@@ -9,7 +9,8 @@
 
 	import { toast } from 'svelte-sonner';
 
-	import { selectedFolder } from '$lib/stores';
+	import { selectedFolder, chatId, user } from '$lib/stores';
+	import { goto } from '$app/navigation';
 
 	import {
 		deleteFolderById,
@@ -39,6 +40,7 @@
 	let showFolderModal = false;
 	let showCreateSubFolderModal = false;
 	let showDeleteConfirm = false;
+	let showArchiveConfirm = false;
 	let deleteFolderContents = true;
 	$: isProject = isProjectFolder(folder);
 	$: projectArchived = isArchivedProject(folder);
@@ -126,11 +128,9 @@
 	};
 
 	const deleteHandler = async () => {
-		if (isProject) {
-			await setProjectArchived(true);
-			return;
-		}
-		const res = await deleteFolderById(localStorage.token, folder.id, deleteFolderContents).catch(
+		const deletedFolder = folder;
+		const deletingProject = isProject;
+		const res = await deleteFolderById(localStorage.token, deletedFolder.id, deletingProject || deleteFolderContents).catch(
 			(error) => {
 				toast.error(`${error}`);
 				return null;
@@ -138,8 +138,14 @@
 		);
 
 		if (res) {
-			toast.success($i18n.t('Folder deleted successfully'));
-			onDelete(folder);
+			const wasSelectedProject = deletingProject && $selectedFolder?.id === deletedFolder.id;
+			toast.success(deletingProject ? '项目、会话和工作区文件已删除' : $i18n.t('Folder deleted successfully'));
+			onDelete(deletedFolder);
+			if (wasSelectedProject) {
+				selectedFolder.set(null);
+				chatId.set('');
+				goto('/');
+			}
 		}
 	};
 
@@ -201,14 +207,25 @@
 	{/if}
 
 	<DeleteConfirmDialog
+		bind:show={showArchiveConfirm}
+		title="归档项目？"
+		confirmLabel="归档项目"
+		on:confirm={() => setProjectArchived(true)}
+	>
+		<div class="text-sm text-gray-700 dark:text-gray-300">
+			归档“{folder.name}”后，会话和文件都会保留，可随时恢复。
+		</div>
+	</DeleteConfirmDialog>
+
+	<DeleteConfirmDialog
 		bind:show={showDeleteConfirm}
-		title={isProject ? '归档项目？' : $i18n.t('Delete folder?')}
-		confirmLabel={isProject ? '归档项目' : $i18n.t('Delete')}
+		title={isProject ? '删除项目？' : $i18n.t('Delete folder?')}
+		confirmLabel={isProject ? '删除项目' : $i18n.t('Delete')}
 		on:confirm={deleteHandler}
 	>
 		<div class="mb-2 flex-1 text-sm text-gray-700 dark:text-gray-300">
 			{isProject
-				? `归档“${folder.name}”后，会话和文件都会保留，可随时恢复。`
+				? `将永久删除“${folder.name}”、全部会话和 Terminal 工作区文件，无法撤销。`
 				: $i18n.t(`Are you sure you want to delete "{{NAME}}"?`, { NAME: folder.name })}
 		</div>
 
@@ -275,6 +292,8 @@
 					align="end"
 					{isProject}
 					{projectArchived}
+					canDelete={!isProject || folder?.user_id === $user?.id || $user?.role === 'admin'}
+					onArchive={() => (showArchiveConfirm = true)}
 					onRestore={() => setProjectArchived(false)}
 					onEdit={() => {
 						showFolderModal = true;

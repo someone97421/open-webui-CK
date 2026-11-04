@@ -21,6 +21,8 @@
 	export let onEdit = () => {};
 	export let onExport = () => {};
 	export let onDelete = () => {};
+	export let onArchive = () => {};
+	export let canDelete = true;
 	export let onCreateSubFolder = () => {};
 	export let onMarkAllRead = () => {};
 	export let onRestore = () => {};
@@ -96,7 +98,7 @@
 				}}
 			>
 				<EditPencil className="size-3.5" />
-				<div class="flex items-center">{$i18n.t('Edit')}</div>
+				<div class="flex items-center">{isProject ? '编辑项目' : $i18n.t('Edit')}</div>
 			</button>
 
 			{#if $user?.role === 'admin' || ($user?.permissions?.chat?.export ?? true)}
@@ -113,24 +115,24 @@
 
 			<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
 
-			{#if isProject && projectArchived}
+			{#if isProject}
 				<button
 					type="button"
 					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
-					on:click={onRestore}
+					on:click={projectArchived ? onRestore : onArchive}
 				>
 					<ArchiveIcon className="size-3.5" />
-					<div class="flex items-center">恢复项目</div>
+					<div class="flex items-center">{projectArchived ? '恢复项目' : '归档项目'}</div>
 				</button>
-			{:else}
+			{/if}
+			{#if canDelete}
 				<button
 					type="button"
 					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
 					on:click={onDelete}
-					title={isProject ? '归档后保留会话和文件，可随时恢复' : undefined}
 				>
-					{#if isProject}<ArchiveIcon className="size-3.5" />{:else}<TrashIcon className="size-3.5" />{/if}
-					<div class="flex items-center">{isProject ? '归档项目' : $i18n.t('Delete')}</div>
+					<TrashIcon className="size-3.5" />
+					<div class="flex items-center">{isProject ? '删除项目' : $i18n.t('Delete')}</div>
 				</button>
 			{/if}
 		</DropdownMenu>

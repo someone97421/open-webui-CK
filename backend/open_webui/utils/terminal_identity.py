@@ -85,6 +85,8 @@ async def terminal_identity_headers(request, connection: dict, user, chat_id: st
     protocol = 'open-terminal/workspace/v1'
     if project:
         payload.update(v=2, scope_type='project', scope_id=project.id, owner=project.user_id)
+        if user.role == 'admin':
+            payload['admin'] = True
         protocol = PROJECT_PROTOCOL
     encoded = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     context = base64.urlsafe_b64encode(encoded).decode('ascii').rstrip('=')

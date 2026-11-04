@@ -12,7 +12,6 @@ from open_webui.models.config import Config
 from open_webui.models.folders import Folders
 from open_webui.models.groups import Groups
 from open_webui.utils.access_control import has_connection_access
-from open_webui.utils.access_control.folders import has_folder_access
 from open_webui.utils.headers import normalize_bearer_token
 
 PROJECT_PROTOCOL = 'open-terminal/workspace/v2'
@@ -29,7 +28,10 @@ def project_config(folder) -> dict | None:
         or type(value.get('archived', False)) is not bool
     ):
         raise HTTPException(status_code=409, detail='项目配置无效，请检查 Terminal 绑定')
-    return {'version': 1, 'terminal_id': value['terminal_id'], 'archived': value.get('archived', False)}
+    return {
+        'version': 1, 'terminal_id': value['terminal_id'], 'archived': value.get('archived', False),
+        **({'deleting': True} if value.get('deleting') is True else {}),
+    }
 
 
 async def get_project_for_folder(folder_id: str | None):
@@ -49,8 +51,10 @@ async def get_project_for_folder(folder_id: str | None):
 
 async def require_project_access(user, project, *, writable=True, allow_archived=False):
     config = project_config(project)
-    if not config or not await has_folder_access(user.id, project, 'write' if writable else 'read', db=None):
+    if not config or (project.user_id != user.id and user.role != 'admin'):
         raise HTTPException(status_code=404, detail='项目不存在或不可访问')
+    if config.get('deleting'):
+        raise HTTPException(status_code=409, detail='项目正在删除；清理失败时请重试删除')
     if config['archived'] and not allow_archived:
         raise HTTPException(status_code=409, detail='项目已归档，请先恢复项目')
     return config

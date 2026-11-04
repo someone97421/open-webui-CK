@@ -34,7 +34,7 @@ from open_webui.models.chats import (
     MessageStats,
 )
 from open_webui.models.config import Config
-from open_webui.models.folders import Folders
+from open_webui.models.folders import Folder, Folders
 from open_webui.models.shared_chats import ChatShareMode, ShareChatForm, SharedChatResponse, SharedChats
 from open_webui.models.tags import TagModel, Tags
 from open_webui.models.users import UserModel
@@ -139,8 +139,16 @@ async def can_read_shared_chat(user, shared, db: AsyncSession) -> bool:
     )
 
 
+async def require_project_chat_owner(chat, user, db):
+    project = await get_source_project(chat, db)
+    if project and (user is None or (project.user_id != user.id and user.role != 'admin')):
+        raise HTTPException(status_code=404, detail='项目会话不存在或不属于当前账号')
+
+
 async def shared_chat_response(chat, user=None, db=None):
     from open_webui.models.users import Users
+
+    await require_project_chat_owner(chat, user, db)
 
     data = ChatResponse.model_validate(chat, from_attributes=True).model_dump()
     if user is None or chat.user_id != user.id:
@@ -263,7 +271,14 @@ async def prepare_project_chat(request: Request, user, folder_id: str | None, ch
         return
     if not await has_folder_write_access(user.id, project.id, db=db):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
-    config = project_config(project)
+    locked = await db.scalar(
+        select(Folder).where(Folder.id == project.id).with_for_update().execution_options(populate_existing=True)
+    )
+    config = project_config(locked)
+    if not config:
+        raise HTTPException(status_code=404, detail='项目不存在')
+    if config.get('deleting'):
+        raise HTTPException(status_code=409, detail='项目正在删除，不能创建聊天')
     if config['archived']:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='项目已归档，请先恢复项目再创建聊天')
     await validate_project_terminal(request, user, config['terminal_id'])
@@ -725,6 +740,8 @@ async def export_single_chat_stats(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=ERROR_MESSAGES.NOT_FOUND,
             )
+
+        await require_project_chat_owner(chat, user, db)
 
         # Verify the chat belongs to the user (unless admin)
         if chat.user_id != user.id and not (user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS):
@@ -1538,6 +1555,8 @@ async def update_chat_message_by_id(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
+    await require_project_chat_owner(chat, user, db)
+
     if chat.user_id != user.id and not (user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1604,6 +1623,8 @@ async def delete_chat_message_by_id(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
+    await require_project_chat_owner(chat, user, db)
+
     if chat.user_id != user.id and not (user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1649,6 +1670,8 @@ async def send_chat_message_event_by_id(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+    await require_project_chat_owner(chat, user, db)
 
     if chat.user_id != user.id and not (user.role == 'admin' and ENABLE_ADMIN_CHAT_ACCESS):
         raise HTTPException(
@@ -1710,6 +1733,8 @@ async def delete_chat_by_id(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+    await require_project_chat_owner(chat, user, db)
 
     # Cancel any in-flight LLM tasks (streaming, title/tags generation) before
     # deleting the chat to prevent orphaned requests.
@@ -2120,6 +2145,9 @@ async def share_chat_by_id(
     if not chat:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
 
+    if await get_source_project(chat, db):
+        raise HTTPException(status_code=409, detail='项目会话仅限所属账号，不支持分享')
+
     # If a share already exists, re-snapshot it
     if chat.share_id:
         shared = await SharedChats.update(chat.share_id, form_data, db=db)
@@ -2207,6 +2235,9 @@ async def update_shared_chat_access_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
+    if await get_source_project(chat, db):
+        raise HTTPException(status_code=409, detail='项目会话仅限所属账号，不支持分享')
+
     form_data.access_grants = await validate_access_grants(
         await Config.get('user.permissions'),
         user.id,
@@ -2244,6 +2275,8 @@ async def get_shared_chat_access_by_id(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+    await require_project_chat_owner(chat, user, db)
 
     grants = await AccessGrants.get_grants_by_resource('shared_chat', id, db=db)
     return [

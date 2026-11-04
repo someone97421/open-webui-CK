@@ -291,6 +291,40 @@
 		Object.entries(folders).filter(([, folder]) => !isProjectFolder(folder))
 	);
 
+	const getActivityTime = (item: any, isFolder = false) =>
+		Math.max(
+			...[isFolder ? item?.last_activity_at : item?.updated_at, item?.created_at].map((value) => {
+				const timestamp = Number(value);
+				return Number.isFinite(timestamp) && timestamp > 0
+					? timestamp / (timestamp >= 1_000_000_000_000 ? 1000 : 1)
+					: 0;
+			})
+		);
+	const getLatestActivity = (items: any[], isFolder = false) =>
+		items.reduce((latest, item) => Math.max(latest, getActivityTime(item, isFolder)), 0);
+
+	$: canUseFolders =
+		$config?.features?.enable_folders &&
+		($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true));
+	$: sidebarSections = [
+		{
+			id: 'chats',
+			activity: getLatestActivity(
+				[...($chats ?? []), ...$pinnedChats].filter((chat) => !chat.folder_id)
+			),
+			index: 0
+		},
+		{ id: 'folders', activity: getLatestActivity(Object.values(legacyFolders), true), index: 1 },
+		{
+			id: 'projects',
+			activity: getLatestActivity(
+				[...Object.values(activeProjectFolders), ...Object.values(archivedProjectFolders)],
+				true
+			),
+			index: 2
+		}
+	].sort((a, b) => b.activity - a.activity || a.index - b.index);
+
 	const initSelectedFolderChats = (folder: SelectedSidebarFolder) => {
 		if (!folder?.id) {
 			return;
@@ -903,6 +937,15 @@
 
 			if (folderId) {
 				if (chat) {
+					if (folders[folderId]) {
+						folders = {
+							...folders,
+							[folderId]: {
+								...folders[folderId],
+								last_activity_at: Math.max(getActivityTime(folders[folderId], true), getActivityTime(chat))
+							}
+						};
+					}
 					return folderRegistry[folderId]?.upsertChat?.(chat);
 				}
 
@@ -1609,6 +1652,8 @@
 						</SidebarSection>
 					{/if}
 
+					{#each sidebarSections as section (section.id)}
+					{#if section.id === 'chats'}
 					<SidebarSection
 						id="sidebar-chats"
 					name="会话"
@@ -1720,6 +1765,7 @@
 							</Dropdown>
 						</svelte:fragment>
 
+						<div class="max-h-[50dvh] overflow-y-auto overscroll-contain scrollbar-hidden">
 						{#if $pinnedChats.length > 0}
 							<div class="mb-1">
 								<div class="flex flex-col space-y-1 rounded-xl">
@@ -1919,9 +1965,10 @@
 								{/if}
 							</div>
 						</div>
+						</div>
 					</SidebarSection>
 
-					{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
+					{:else if section.id === 'folders' && canUseFolders}
 						<SidebarSection
 							id="sidebar-folders"
 							bind:open={showFolders}
@@ -1974,7 +2021,7 @@
 								}}
 							/>
 						</SidebarSection>
-
+					{:else if section.id === 'projects' && canUseFolders}
 						<SidebarSection
 							id="sidebar-projects"
 							bind:open={showProjects}
@@ -2019,6 +2066,7 @@
 							{/if}
 						</SidebarSection>
 					{/if}
+					{/each}
 				</div>
 
 				<div class="px-1 pt-1 pb-1.5 sticky bottom-0 z-10 -mt-2 sidebar">

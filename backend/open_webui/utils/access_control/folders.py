@@ -10,6 +10,9 @@ async def has_folder_access(user_id: str, folder: FolderModel, permission: str, 
     while folder and folder.id not in seen_ids:
         seen_ids.add(folder.id)
 
+        if (folder.data or {}).get('project') is not None:
+            return folder.user_id == user_id
+
         if folder.user_id == user_id:
             return True
 

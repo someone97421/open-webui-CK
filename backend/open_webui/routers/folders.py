@@ -36,7 +36,7 @@ from open_webui.utils.access_control.files import can_read_all_folder_files, get
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.projects import get_project_for_folder, project_config, validate_project_terminal
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -64,6 +64,21 @@ async def get_folder_unread_counts(user_id: str, db: AsyncSession | None = None)
             current_id = parent_by_id.get(current_id)
 
     return unread_counts
+
+
+async def get_folder_last_activity(folder_ids: list[str], db: AsyncSession) -> dict[str, int]:
+    if not folder_ids:
+        return {}
+    result = await db.execute(
+        select(Chat.folder_id, func.max(Chat.updated_at))
+        .where(
+            Chat.folder_id.in_(folder_ids),
+            Chat.archived == False,
+            Chat.meta['internal'].as_boolean().is_not(True),
+        )
+        .group_by(Chat.folder_id)
+    )
+    return {folder_id: updated_at or 0 for folder_id, updated_at in result.all()}
 
 
 async def check_folders_permission(request: Request, user, db=None):
@@ -105,13 +120,25 @@ def validate_project_data(data: dict | None) -> dict | None:
     return project
 
 
+def require_project_owner(folder, user):
+    if folder and (folder.data or {}).get('project') is not None and folder.user_id != user.id and user.role != 'admin':
+        raise HTTPException(status_code=404, detail='项目不存在或不属于当前账号')
+
+
 async def validate_project_update(request: Request, user, folder, data: dict, db: AsyncSession):
     previous = project_config(folder)
+    if previous and previous.get('deleting'):
+        raise HTTPException(status_code=409, detail='项目正在删除，请重试删除完成清理')
     if previous and isinstance(data.get('project'), dict):
         data['project'] = {**previous, **data['project']}
     project = validate_project_data(data)
     if not previous and not project:
         return
+
+    if folder.user_id != user.id and user.role != 'admin':
+        raise HTTPException(status_code=404, detail='项目不存在或不属于当前账号')
+    if project and not previous and (data.get('share_mode') or (folder.data or {}).get('share_mode') or await AccessGrants.get_grants_by_resource('folder', folder.id, db=db)):
+        raise HTTPException(status_code=409, detail='项目仅限当前账号，请先取消分组共享后再转换为项目')
 
     children = await Folders.get_children_folders_by_id_and_user_id(folder.id, folder.user_id, db=db) or []
     folder_ids = [folder.id, *[child.id for child in children]]
@@ -184,10 +211,14 @@ async def get_folders(
         folder_list.append(folder)
 
     unread_counts = await get_folder_unread_counts(user.id, db=db)
+    last_activity = await get_folder_last_activity([folder.id for folder in folder_list], db)
 
     return [
         FolderNameIdResponse(
-            **folder.model_dump(), project=project_config(folder), unread_count=unread_counts.get(folder.id, 0)
+            **folder.model_dump(),
+            project=project_config(folder),
+            unread_count=unread_counts.get(folder.id, 0),
+            last_activity_at=max(folder.created_at, last_activity.get(folder.id, 0)),
         )
         for folder in folder_list
     ]
@@ -307,6 +338,7 @@ async def get_shared_folders(
     folder_perms = await Folders.get_shared_folder_ids_for_user(user.id, group_ids, db=db)
 
     shared_folders = await Folders.get_folders_by_ids(list(folder_perms.keys()), db=db)
+    shared_folders = [folder for folder in shared_folders if not project_config(folder)]
 
     owners = await Users.get_users_by_user_ids([folder.user_id for folder in shared_folders], db=db)
     owner_names = {owner.id: owner.name for owner in owners}
@@ -326,6 +358,8 @@ async def get_shared_folders(
     for folder in shared_folders:
         children = await Folders.get_children_folders_by_id_and_user_id(folder.id, folder.user_id, db=db)
         for child in children or []:
+            if project_config(child):
+                continue
             permission = 'write' if folder.user_id == user.id or child.user_id == user.id else folder_perms[folder.id]
             if child.id in result_by_id:
                 # A weaker direct grant must not hide inherited write access.
@@ -339,6 +373,10 @@ async def get_shared_folders(
                     'permission': permission,
                 }
                 results.append(result_by_id[child.id])
+
+    last_activity = await get_folder_last_activity(list(result_by_id), db)
+    for folder in results:
+        folder['last_activity_at'] = max(folder['created_at'], last_activity.get(folder['id'], 0))
 
     return results
 
@@ -367,6 +405,7 @@ async def get_folder_by_id(
 
     # Check shared access
     folder = await Folders.get_folder_by_id(id, db=db)
+    require_project_owner(folder, user)
     if folder and (user.role == 'admin' or await _has_folder_access(user.id, folder, 'read', db)):
         grants = await AccessGrants.get_grants_by_resource('folder', id, db=db)
         return FolderResponse(
@@ -397,6 +436,7 @@ async def update_folder_name_by_id(
     if not folder:
         # Check shared write access
         folder = await Folders.get_folder_by_id(id, db=db)
+        require_project_owner(folder, user)
         if not folder or (user.role != 'admin' and not await _has_folder_access(user.id, folder, 'write', db)):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -561,6 +601,7 @@ async def update_folder_is_expanded_by_id(
     folder = await Folders.get_folder_by_id_and_user_id(id, user.id, db=db)
     if not folder:
         folder = await Folders.get_folder_by_id(id, db=db)
+        require_project_owner(folder, user)
         if folder and (user.role == 'admin' or await _has_folder_access(user.id, folder, 'read', db)):
             return folder
 
@@ -607,6 +648,10 @@ async def update_folder_access_by_id(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+    require_project_owner(folder, user)
+    if project_config(folder):
+        raise HTTPException(status_code=409, detail='项目仅限所属账号，不支持共享')
 
     # Editing folder contents does not grant permission to manage sharing.
     if user.role != 'admin' and user.id != folder.user_id:
@@ -666,6 +711,7 @@ async def get_shared_folder_chats(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
+    require_project_owner(folder, user)
     is_owner = user.id == folder.user_id
     is_admin = user.role == 'admin'
     has_write = is_owner or is_admin or await _has_folder_access(user.id, folder, 'write', db)
@@ -739,6 +785,7 @@ async def mark_folder_chats_read_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
+    require_project_owner(folder, user)
     is_owner = user.id == folder.user_id
     is_admin = user.role == 'admin'
     if not (is_owner or is_admin or await _has_folder_access(user.id, folder, 'read', db)):
@@ -773,12 +820,12 @@ async def delete_folder_by_id(
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    await check_folders_permission(request, user, db=db)
     folder = await Folders.get_folder_by_id_and_user_id(id, user.id, db=db)
 
     if not folder:
         # Deletion cascades into the owner's data, so only the owner or an admin may delete
         folder = await Folders.get_folder_by_id(id, db=db)
+        require_project_owner(folder, user)
         if not folder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -791,13 +838,20 @@ async def delete_folder_by_id(
             )
 
     folder_owner_id = folder.user_id
+    if project_config(folder):
+        if not delete_contents:
+            raise HTTPException(status_code=400, detail='删除项目必须同时删除项目会话和工作区文件')
+        from open_webui.utils.project_deletion import delete_project
 
+        return await delete_project(request, user, folder, db)
+
+    await check_folders_permission(request, user, db=db)
     folder_ids = await Folders.get_folder_ids_by_id_and_user_id_in_subtree(id, folder_owner_id, db=db)
     subtree = await Folders.get_folders_by_ids(folder_ids, db=db)
     if await get_project_for_folder(id) or any(project_config(item) for item in subtree):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail='请归档项目；工作区文件将保留',
+            detail='请单独删除项目，以便清理对应工作区',
         )
     if delete_contents and await Chats.count_chats_by_folder_ids_and_user_id(folder_ids, folder_owner_id, db=db):
         chat_delete_permission = await has_permission(

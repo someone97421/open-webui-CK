@@ -490,6 +490,7 @@
 	});
 
 	let showDeleteConfirm = false;
+	let showArchiveConfirm = false;
 
 	const setProjectArchived = async (archived) => {
 		const fullFolder = await getFolderById(localStorage.token, folderId).catch((error) => {
@@ -514,11 +515,11 @@
 	};
 
 	const deleteHandler = async () => {
-		if (isProject) {
-			await setProjectArchived(true);
-			return;
-		}
-		const res = await deleteFolderById(localStorage.token, folderId, deleteFolderContents).catch(
+		const deletingProject = isProject;
+		const currentChat = deletingProject && $chatId
+			? await getChatById(localStorage.token, $chatId).catch(() => null)
+			: null;
+		const res = await deleteFolderById(localStorage.token, folderId, isProject || deleteFolderContents).catch(
 			(error) => {
 				toast.error(`${error}`);
 				return null;
@@ -526,8 +527,17 @@
 		);
 
 		if (res) {
-			toast.success($i18n.t('Folder deleted successfully'));
+			const wasSelectedProject = deletingProject && (
+				$selectedFolder?.id === folderId ||
+				(currentChat?.folder_id === folderId && $chatId === currentChat.id)
+			);
+			toast.success(deletingProject ? '项目、会话和工作区文件已删除' : $i18n.t('Folder deleted successfully'));
 			onDelete(folderId);
+			if (wasSelectedProject) {
+				selectedFolder.set(null);
+				chatId.set('');
+				goto('/');
+			}
 		}
 	};
 
@@ -744,14 +754,25 @@
 </script>
 
 <DeleteConfirmDialog
+	bind:show={showArchiveConfirm}
+	title="归档项目？"
+	confirmLabel="归档项目"
+	on:confirm={() => setProjectArchived(true)}
+>
+	<div class="text-sm text-gray-700 dark:text-gray-300">
+		归档“{folders[folderId].name}”后，会话和文件都会保留，可随时恢复。
+	</div>
+</DeleteConfirmDialog>
+
+<DeleteConfirmDialog
 	bind:show={showDeleteConfirm}
-	title={isProject ? '归档项目？' : $i18n.t('Delete folder?')}
-	confirmLabel={isProject ? '归档项目' : $i18n.t('Delete')}
+	title={isProject ? '删除项目？' : $i18n.t('Delete folder?')}
+	confirmLabel={isProject ? '删除项目' : $i18n.t('Delete')}
 	on:confirm={deleteHandler}
 >
 	<div class="mb-2 flex-1 text-sm text-gray-700 dark:text-gray-300">
 		{isProject
-			? `归档“${folders[folderId].name}”后，会话和文件都会保留，可随时恢复。`
+			? `将永久删除“${folders[folderId].name}”、全部会话和 Terminal 工作区文件，无法撤销。`
 			: $i18n.t(`Are you sure you want to delete "{{NAME}}"?`, {
 					NAME: folders[folderId].name
 				})}
@@ -978,6 +999,8 @@
 						<FolderMenu
 							{isProject}
 							{projectArchived}
+							canDelete={!isProject || folders[folderId]?.user_id === $user?.id || $user?.role === 'admin'}
+							onArchive={() => (showArchiveConfirm = true)}
 							onRestore={() => setProjectArchived(false)}
 							onNewChat={openFolderHandler}
 							onEdit={() => {

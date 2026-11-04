@@ -152,13 +152,23 @@ async def search_workspace(  # noqa: C901 — keep permission scoping and source
             .exists()
         )
 
+    foreign_projects = select(Folder.id).where(
+        user.role != 'admin', Folder.user_id != user.id,
+        Folder.data['project']['version'].as_integer() == 1,
+    )
+    foreign_project_chats = select(Chat.id).where(Chat.folder_id.in_(foreign_projects))
+
     # UNION (not UNION ALL) terminates even if malformed folder data contains a cycle.
     folders = (
         select(Folder.id)
         .where(or_(Folder.user_id == user.id, granted('folder', Folder.id, True)))
+        .where(Folder.id.not_in(foreign_projects))
         .cte('search_folders', recursive=True)
     )
-    folders = folders.union(select(Folder.id).join(folders, Folder.parent_id == folders.c.id))
+    folders = folders.union(
+        select(Folder.id).join(folders, Folder.parent_id == folders.c.id)
+        .where(Folder.id.not_in(foreign_projects))
+    )
     folder_rows = (
         await db.execute(
             select(Folder.id, Folder.name, Folder.parent_id, Folder.user_id).where(Folder.id.in_(select(folders.c.id)))
@@ -275,8 +285,9 @@ async def search_workspace(  # noqa: C901 — keep permission scoping and source
         continue_shared = select(SharedChat.chat_id).where(
             SharedChat.chat['share_mode'].as_string() == 'continue', granted('shared_chat', SharedChat.chat_id)
         )
-        live_access = or_(
-            Chat.user_id == user.id, Chat.folder_id.in_(select(folders.c.id)), Chat.id.in_(continue_shared)
+        live_access = and_(
+            or_(Chat.user_id == user.id, Chat.folder_id.in_(select(folders.c.id)), Chat.id.in_(continue_shared)),
+            or_(Chat.folder_id.is_(None), Chat.folder_id.not_in(foreign_projects)),
         )
         live_ids = select(Chat.id).where(live_access)
         rank = (
@@ -316,7 +327,8 @@ async def search_workspace(  # noqa: C901 — keep permission scoping and source
         sources['chat'] = (Chat, apply_match(stmt, Chat), rank, Chat.updated_at)
         if not scope and sharing != 'mine' and not chat_filtered:
             stmt = select(SharedChat).where(
-                granted('shared_chat', SharedChat.chat_id), ~SharedChat.chat_id.in_(live_ids)
+                granted('shared_chat', SharedChat.chat_id), ~SharedChat.chat_id.in_(live_ids),
+                SharedChat.chat_id.not_in(foreign_project_chats),
             )
             if sharing == 'shared':
                 stmt = stmt.where(SharedChat.user_id != user.id)

@@ -358,6 +358,7 @@ class ChatTitleIdResponse(BaseModel):
     active: bool = False
     pending_approval: bool = False
     archived: bool = False
+    folder_id: str | None = None
 
 
 class SharedChatResponse(BaseModel):
@@ -1999,6 +2000,13 @@ class ChatTable:
         chat = chat if chat is not None else await self.get_chat_by_id(id, db=db)
         if not chat:
             return None
+        if chat.folder_id:
+            from open_webui.utils.projects import get_project_for_folder
+
+            project = await get_project_for_folder(chat.folder_id)
+            if project and project.user_id != user.id and user.role != 'admin':
+                return None
+
         if (
             chat.user_id == user.id
             or user.role == 'admin'
@@ -2186,7 +2194,7 @@ class ChatTable:
         self, user_id: str, db: AsyncSession | None = None
     ) -> list[ChatTitleIdResponse]:
         async with get_async_db_context(db) as session:
-            stmt = select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at).filter_by(
+            stmt = select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at, Chat.last_read_at, Chat.folder_id).filter_by(
                 user_id=user_id, pinned=True, archived=False
             )
             stmt = stmt.where(Chat.meta['internal'].as_boolean().is_not(True))
@@ -2200,6 +2208,7 @@ class ChatTable:
                         'updated_at': chat[2],
                         'created_at': chat[3],
                         'last_read_at': chat[4],
+                        'folder_id': chat[5],
                     }
                 )
                 for chat in all_chats
