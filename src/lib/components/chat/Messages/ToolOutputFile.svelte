@@ -23,6 +23,7 @@
 
 	export let item: any;
 	export let chatId = '';
+	export let localBlob: Blob | null = null;
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
@@ -31,6 +32,7 @@
 	let loadedKey = '';
 	let error = '';
 	let objectUrls: string[] = [];
+	let destroyed = false;
 
 	let fileImageUrl: string | null = null;
 	let fileVideoUrl: string | null = null;
@@ -62,12 +64,10 @@
 	$: name = String(item?.name || path.split('/').filter(Boolean).at(-1) || 'file');
 	$: targetPage = normalizeDocumentTargetPage(item?.page);
 	$: selector = item?.terminal_selector;
-	$: terminal = resolveTerminal();
-	$: unavailable = !terminal && !fileId;
-	$: previewKey = fileId || (terminal ? `${terminal.url}|${terminal.key}|${path}|${chatId}` : '');
-	$: isPerChatTerminal =
-		($terminalServers ?? []).find((server: any) => server.id === selector)?.contexts?.chat
-			?.context_id === 'chat_id';
+	$: terminal = resolveTerminal(selector, $terminalServers ?? [], $settings);
+	$: unavailable = !terminal && !fileId && !localBlob;
+	$: previewKey = localBlob ? `local:${path}:${chatId}` : fileId || (terminal ? `${terminal.url}|${terminal.key}|${path}|${chatId}` : '');
+	$: isPerChatTerminal = ($terminalServers ?? []).some((server: any) => server.id === selector);
 	$: previewBaseUrl =
 		terminal && isPerChatTerminal && chatId
 			? `${terminal.url}/chats/${encodeURIComponent(chatId)}`
@@ -96,16 +96,16 @@
 
 	const t = (key: string, vars?: Record<string, unknown>) => $i18n?.t?.(key, vars) ?? key;
 
-	function resolveTerminal(): { url: string; key: string } | null {
-		if (!selector || $selectedTerminalId !== selector) return null;
+	function resolveTerminal(fileSelector: string, servers: any[], preferences: any): { url: string; key: string } | null {
+		if (!fileSelector) return null;
 
-		const systemTerminal = ($terminalServers ?? []).find((server: any) => server.id === selector);
+		const systemTerminal = servers.find((server: any) => server.id === fileSelector);
 		if (systemTerminal?.url) {
 			return { url: systemTerminal.url, key: localStorage.token };
 		}
 
-		const directTerminal = (($settings as any)?.terminalServers ?? []).find(
-			(server: any) => server.url === selector && server.enabled
+		const directTerminal = (preferences?.terminalServers ?? []).find(
+			(server: any) => server.url === fileSelector && server.enabled
 		);
 		if (directTerminal?.url) {
 			return { url: directTerminal.url, key: directTerminal.key ?? '' };
@@ -134,6 +134,7 @@
 	}
 
 	async function blobForPreview() {
+		if (localBlob) return { blob: localBlob, filename: name };
 		if (fileId) {
 			const data = await getFileContentById(fileId).catch(() => null);
 			return data
@@ -221,10 +222,12 @@
 						fileOfficeSlides = resultImages.images;
 					}
 				}
-			} else if (fileId) {
+			} else if (fileId || localBlob) {
 				const result = await blobForPreview();
 				if (!result) throw new Error(t('Preview failed'));
-				fileContent = await result.blob.text();
+				if (/^(?:text\/|application\/(?:json|xml|javascript))/.test(result.blob.type) || /\.(?:txt|log|md|markdown|csv|tsv|json|html?|svg|xml|ya?ml|py|js|ts|css|sh|sql|ipynb)$/i.test(path)) {
+					fileContent = await result.blob.text();
+				}
 			} else if (terminal) {
 				fileContent = await readFile(terminal.url, terminal.key, path, chatId || undefined);
 			}
@@ -232,6 +235,7 @@
 			error = e instanceof Error ? e.message : t('Preview failed');
 		} finally {
 			loading = false;
+			if (destroyed) clearPreview();
 		}
 	}
 
@@ -257,7 +261,7 @@
 		URL.revokeObjectURL(url);
 	}
 
-	onDestroy(clearPreview);
+	onDestroy(() => { destroyed = true; clearPreview(); });
 </script>
 
 <div
@@ -291,7 +295,7 @@
 		>
 			<Icon name="download" size={13} />
 		</button>
-		{#if !fileId}
+		{#if !fileId && !localBlob && selector === $selectedTerminalId}
 			<button
 				type="button"
 				class="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:text-gray-700 disabled:opacity-40 disabled:hover:text-gray-400 dark:text-gray-500 dark:hover:text-gray-200 dark:disabled:hover:text-gray-500"

@@ -508,6 +508,30 @@ def deep_merge(target, source):
         return source
 
 
+def _merge_responses_reasoning_item(item: dict, previous: dict | None) -> dict:
+    if (
+        item.get('type') != 'reasoning'
+        or not previous
+        or previous.get('type') != 'reasoning'
+        or (item.get('id') and previous.get('id') and item['id'] != previous['id'])
+    ):
+        return item
+
+    merged = item.copy()
+    for key in ('summary', 'encrypted_content'):
+        if not merged.get(key) and previous.get(key):
+            merged[key] = previous[key]
+    return merged
+
+
+def _find_responses_output_index(output: list, item_id: str | None, fallback: int) -> int:
+    if item_id:
+        for index, item in enumerate(output):
+            if item.get('id') == item_id:
+                return index
+    return fallback
+
+
 def handle_responses_streaming_event(
     data: dict,
     current_output: list,
@@ -598,6 +622,54 @@ def handle_responses_streaming_event(
             item['summary'].append(part)
             return new_output, None
         return current_output, None
+
+    elif event_type in (
+        'response.reasoning_summary_text.done',
+        'response.reasoning_summary_part.done',
+    ):
+        if event_type == 'response.reasoning_summary_text.done':
+            if 'text' not in data:
+                return current_output, None
+            final_part = {'type': 'summary_text', 'text': data['text']}
+        else:
+            final_part = data.get('part')
+            if not final_part:
+                return current_output, None
+
+        output_index = _find_responses_output_index(
+            current_output,
+            data.get('item_id'),
+            data.get('output_index', max(len(current_output) - 1, 0)),
+        )
+        summary_index = data.get('summary_index', 0)
+        if output_index < 0 or summary_index < 0:
+            return current_output, None
+
+        new_output = list(current_output)
+        while len(new_output) <= output_index:
+            new_output.append(
+                {'type': 'message', 'status': 'in_progress', 'role': 'assistant', 'content': []}
+            )
+        if output_index >= len(current_output):
+            new_output[output_index] = {
+                'id': data.get('item_id'),
+                'type': 'reasoning',
+                'status': 'in_progress',
+            }
+        item = new_output[output_index].copy()
+        if item.get('type') != 'reasoning':
+            return current_output, None
+        new_output[output_index] = item
+        summary = list(item.get('summary') or [])
+        while len(summary) <= summary_index:
+            summary.append({'type': 'summary_text', 'text': ''})
+        if event_type == 'response.reasoning_summary_text.done':
+            summary[summary_index] = {**summary[summary_index], **final_part}
+            item['status'] = 'completed'
+        else:
+            summary[summary_index] = final_part.copy()
+        item['summary'] = summary
+        return new_output, {}
 
     elif event_type.startswith('response.') and event_type.endswith('.delta'):
         # Generic Delta Handling
@@ -737,11 +809,17 @@ def handle_responses_streaming_event(
     elif event_type == 'response.output_item.done':
         # Delta Event: Output item complete
         item = data.get('item')
-        output_index = data.get('output_index', len(current_output) - 1)
+        output_index = _find_responses_output_index(
+            current_output,
+            item.get('id') if item else None,
+            data.get('output_index', len(current_output) - 1),
+        )
 
         new_output = list(current_output)
         if item and 0 <= output_index < len(current_output):
-            new_output[output_index] = item
+            new_output[output_index] = _merge_responses_reasoning_item(
+                item, current_output[output_index]
+            )
         elif item:
             new_output.append(item)
         return new_output, {}
@@ -773,23 +851,6 @@ def handle_responses_streaming_event(
                             return new_output, {}
                 return current_output, None
 
-            elif type_name == 'reasoning_summary_part':
-                part = data.get('part')
-                output_index = data.get('output_index', len(current_output) - 1)
-
-                if part and current_output and 0 <= output_index < len(current_output):
-                    new_output = list(current_output)
-                    item = new_output[output_index].copy()
-                    new_output[output_index] = item
-
-                    if 'summary' in item:
-                        item['summary'] = list(item['summary'])
-                        summary_index = data.get('summary_index', len(item['summary']) - 1)
-                        if 0 <= summary_index < len(item['summary']):
-                            item['summary'][summary_index] = part
-                            return new_output, {}
-                return current_output, None
-
             # 2. Generic Field Done (text.done, audio.done)
             if type_name not in ['completed', 'failed']:
                 output_index = data.get('output_index', len(current_output) - 1)
@@ -801,7 +862,6 @@ def handle_responses_streaming_event(
                             'text',
                             'output_text',
                             'reasoning_text',
-                            'reasoning_summary_text',
                         ]
                         else type_name
                     )
@@ -841,13 +901,19 @@ def handle_responses_streaming_event(
         final_output = response_data.get('output')
 
         # Some providers send an empty output on response.completed despite having streamed items
-        new_output = final_output if final_output else current_output
+        new_output = []
+        for index, item in enumerate(final_output if final_output else current_output):
+            previous_index = _find_responses_output_index(current_output, item.get('id'), index)
+            previous = (
+                current_output[previous_index] if previous_index < len(current_output) else None
+            )
+            new_output.append(_merge_responses_reasoning_item(item, previous))
 
         # Ensure reasoning items are marked as completed in the final output
         if new_output:
-            for item in new_output:
+            for index, item in enumerate(new_output):
                 if item.get('type') == 'reasoning' and item.get('status') != 'completed':
-                    item['status'] = 'completed'
+                    new_output[index] = {**item, 'status': 'completed'}
 
         return new_output, {
             'usage': response_data.get('usage'),

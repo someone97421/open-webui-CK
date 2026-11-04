@@ -8,6 +8,7 @@ const sandboxScript = String.raw`
 	let pyodideReady = null;
 	let stdout = null;
 	let stderr = null;
+	let runtimeScope = null;
 
 	function post(message, transfer) {
 		parent.postMessage(message, '*', transfer || []);
@@ -150,6 +151,10 @@ const sandboxScript = String.raw`
 		const data = event.data || {};
 		const id = data.id;
 		try {
+			if (!data.scope || (runtimeScope && runtimeScope !== data.scope)) {
+				throw new Error('Python context mismatch');
+			}
+			runtimeScope = data.scope;
 			if (!data.type || data.type === 'execute') {
 				await ensureRuntime(data.packages || []);
 				await execute(id, data.code, data.files);
@@ -185,7 +190,8 @@ const sandboxScript = String.raw`
 					break;
 			}
 		} catch (error) {
-			post({ id: id, stderr: error && error.message ? error.message : String(error) });
+			const message = error && error.message ? error.message : String(error);
+			post({ id: id, type: data.type, error: message, stderr: message, success: false });
 		}
 	});
 })();

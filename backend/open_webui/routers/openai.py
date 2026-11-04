@@ -39,11 +39,25 @@ from open_webui.models.groups import Groups
 from open_webui.models.models import Models
 from open_webui.models.users import UserModel
 from open_webui.utils.access_control import check_model_access, has_connection_access, has_permission
-from open_webui.utils.anthropic import ANTHROPIC_VERSION, get_anthropic_models, is_anthropic_url
+from open_webui.utils.anthropic import (
+    get_anthropic_models,
+    prepare_anthropic_headers,
+    uses_anthropic_messages,
+)
+from open_webui.utils.anthropic_native import (
+    convert_anthropic_stream_to_chat_completions,
+    convert_anthropic_to_chat_completion,
+    convert_chat_completions_to_anthropic,
+)
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import get_headers_and_cookies, include_user_info_headers
 from open_webui.utils.json_codec import JSONCodec
-from open_webui.utils.misc import convert_logit_bias_input_to_json, get_provider_function
+from open_webui.utils.misc import (
+    convert_logit_bias_input_to_json,
+    get_provider_function,
+    get_reasoning_details,
+    get_replayable_responses_reasoning,
+)
 from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
@@ -82,6 +96,14 @@ def _clean_proxy_headers(raw_headers) -> dict:
     return {k: v for k, v in raw_headers.items() if k.lower() not in _STRIP_PROXY_HEADERS}
 
 
+async def _anthropic_stream_wrapper(response):
+    try:
+        async for chunk in convert_anthropic_stream_to_chat_completions(stream_wrapper(response)):
+            yield chunk
+    finally:
+        await cleanup_response(response)
+
+
 async def send_get_request(
     request: Request = None,
     url=None,
@@ -101,6 +123,8 @@ async def send_get_request(
 
                 if ENABLE_FORWARD_USER_INFO_HEADERS and user:
                     headers = include_user_info_headers(headers, user, request=request)
+
+            headers = prepare_anthropic_headers(headers, url, key, config)
 
             async with session.get(
                 url,
@@ -122,8 +146,8 @@ async def get_models_request(
     user: UserModel = None,
     config=None,
 ):
-    if is_anthropic_url(url):
-        return await get_anthropic_models(url, key, user=user)
+    if uses_anthropic_messages(url, config):
+        return await get_anthropic_models(url, key, user=user, request=request, config=config)
     return await send_get_request(request, f'{url}/models', key, user=user, config=config)
 
 
@@ -392,12 +416,7 @@ async def get_anthropic_request_target(request: Request, form_data: dict, user: 
 
     headers, cookies = await get_headers_and_cookies(request, url, key, api_config, user=user)
 
-    # Anthropic's native endpoints reject bearer auth, the key belongs in x-api-key.
-    if is_anthropic_url(url):
-        headers.setdefault('anthropic-version', ANTHROPIC_VERSION)
-        if api_config.get('auth_type') in (None, 'bearer'):
-            headers.pop('Authorization', None)
-            headers.setdefault('x-api-key', key)
+    headers = prepare_anthropic_headers(headers, url, key, api_config)
 
     return requested_model, payload, url, key, headers, cookies
 
@@ -799,14 +818,15 @@ async def get_models(request: Request, url_idx: int | None = None, user=Depends(
         ) as session:
             try:
                 headers, cookies = await get_headers_and_cookies(request, url, key, api_config, user=user)
+                headers = prepare_anthropic_headers(headers, url, key, api_config)
 
                 if api_config.get('azure') or api_config.get('provider') == 'azure':
                     models = {
                         'data': api_config.get('model_ids', []) or [],
                         'object': 'list',
                     }
-                elif is_anthropic_url(url):
-                    models = await get_anthropic_models(url, key, user=user)
+                elif uses_anthropic_messages(url, api_config):
+                    models = await get_anthropic_models(url, key, user=user, request=request, config=api_config)
                     if models is None:
                         raise Exception('Failed to connect to Anthropic API')
                 else:
@@ -993,6 +1013,7 @@ async def verify_connection(
     ) as session:
         try:
             headers, cookies = await get_headers_and_cookies(request, url, key, api_config, user=user)
+            headers = prepare_anthropic_headers(headers, url, key, api_config)
 
             if api_config.get('azure') or api_config.get('provider') == 'azure':
                 # Only set api-key header if not using Azure Entra ID authentication
@@ -1028,8 +1049,8 @@ async def verify_connection(
                             return PlainTextResponse(status_code=r.status, content=response_data)
 
                     return response_data
-            elif is_anthropic_url(url):
-                result = await get_anthropic_models(url, key)
+            elif uses_anthropic_messages(url, api_config):
+                result = await get_anthropic_models(url, key, user=user, request=request, config=api_config)
                 if result is None:
                     raise HTTPException(status_code=500, detail=ERROR_MESSAGES.SERVER_CONNECTION_ERROR)
                 if 'error' in result:
@@ -1184,6 +1205,8 @@ def _normalize_stored_item(item: dict) -> dict:
         return item
     if item_type == 'function_call':
         item = {**item, **get_provider_function(item)}
+    if item_type == 'reasoning':
+        item = {**item, 'summary': item['summary'] if isinstance(item.get('summary'), list) else []}
     return {k: v for k, v in item.items() if k in allowed}
 
 
@@ -1194,6 +1217,7 @@ def convert_to_responses_payload(payload: dict) -> dict:
     Chat Completions: { messages: [{role, content}], ... }
     Responses API: { input: [{type: "message", role, content: [...]}], instructions: "system" }
     """
+    payload = dict(payload)
     messages = payload.pop('messages', [])
 
     system_content = ''
@@ -1206,7 +1230,31 @@ def convert_to_responses_payload(payload: dict) -> dict:
         # Check for stored output items (from previous Responses API turn)
         stored_output = msg.get('output')
         if stored_output and isinstance(stored_output, list):
-            input_items.extend(_normalize_stored_item(item) for item in stored_output)
+            for item in stored_output:
+                if item.get('type') == 'reasoning':
+                    item = get_replayable_responses_reasoning(item)
+                    if not item or payload.get('previous_response_id'):
+                        continue
+                input_items.append(_normalize_stored_item(item))
+            continue
+
+        if role == 'assistant' and not payload.get('previous_response_id'):
+            details = get_reasoning_details(msg) or []
+            details = details if isinstance(details, list) else [details]
+            for detail in details:
+                if not isinstance(detail, dict) or detail.get('format') != 'open-webui-responses-v1':
+                    continue
+                try:
+                    native_item = detail.get('data', '')
+                    native_item = JSONCodec.loads(native_item) if isinstance(native_item, str) else native_item
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(native_item, dict):
+                    native_item = get_replayable_responses_reasoning(native_item)
+                    if native_item:
+                        input_items.append(_normalize_stored_item(native_item))
+
+        if role == 'assistant' and not content and not msg.get('tool_calls'):
             continue
 
         if role == 'system':
@@ -1290,6 +1338,28 @@ def convert_to_responses_payload(payload: dict) -> dict:
         input_items.append({'type': 'message', 'role': role, 'content': content_parts})
 
     responses_payload = {**payload, 'input': input_items}
+    effort = responses_payload.pop('reasoning_effort', None)
+    reasoning = responses_payload.get('reasoning')
+    model_name = re.sub(r'^(?:[a-z-]+\.)?openai\.', '', str(payload.get('model') or '').lower())
+    known_reasoning_model = (
+        is_openai_new_model(model_name)
+        and not model_name.startswith(('o1-mini', 'o1-preview'))
+        and not re.search(r'-chat(?:-|$)', model_name)
+    )
+    if isinstance(reasoning, dict) or effort is not None or (
+        'reasoning' not in responses_payload and known_reasoning_model
+    ):
+        reasoning = dict(reasoning) if isinstance(reasoning, dict) else {}
+        if effort is not None:
+            reasoning.setdefault('effort', effort)
+        if reasoning.get('effort') not in ('none', 'disabled'):
+            reasoning.setdefault('summary', 'auto')
+        responses_payload['reasoning'] = reasoning
+        include = responses_payload.get('include') or []
+        include = [include] if isinstance(include, str) else list(include)
+        if 'reasoning.encrypted_content' not in include:
+            include.append('reasoning.encrypted_content')
+        responses_payload['include'] = include
 
     # Forward previous_response_id when the middleware has set it
     # (only used when ENABLE_RESPONSES_API_STATEFUL is enabled).
@@ -1358,6 +1428,7 @@ def convert_responses_result(response: dict) -> dict:
 
     content = ''
     refusal = ''
+    reasoning_summary = ''
     tool_calls = []
     for item in output_items:
         if item.get('type') == 'message':
@@ -1380,6 +1451,10 @@ def convert_responses_result(response: dict) -> dict:
                     },
                 }
             )
+        elif item.get('type') == 'reasoning':
+            reasoning_summary += '\n'.join(
+                part.get('text', '') for part in item.get('summary', []) or [] if isinstance(part, dict)
+            )
 
     return {
         'id': response.get('id', ''),
@@ -1392,6 +1467,7 @@ def convert_responses_result(response: dict) -> dict:
                 'message': {
                     'role': 'assistant',
                     'content': content,
+                    **({'reasoning_content': reasoning_summary} if reasoning_summary else {}),
                     **({'refusal': refusal} if refusal else {}),
                     **({'tool_calls': tool_calls} if tool_calls else {}),
                 },
@@ -1399,6 +1475,7 @@ def convert_responses_result(response: dict) -> dict:
             }
         ],
         'usage': convert_responses_usage_to_chat_completions(response.get('usage')) or None,
+        'output': output_items,
     }
 
 
@@ -1485,7 +1562,7 @@ async def generate_chat_completion(
         }
 
     # Check if model is a reasoning model that needs special handling
-    if is_openai_new_model(payload['model']):
+    if not uses_anthropic_messages(url, api_config) and is_openai_new_model(payload['model']):
         payload = openai_reasoning_model_handler(payload)
     elif 'api.openai.com' not in url:
         # Remove "max_completion_tokens" from the payload for backward compatibility
@@ -1506,12 +1583,36 @@ async def generate_chat_completion(
     headers, cookies = await get_headers_and_cookies(request, url, key, api_config, metadata, user=user)
 
     is_responses = api_config.get('api_type') == 'responses'
+    is_messages = uses_anthropic_messages(url, api_config)
+    if is_messages and (api_config.get('azure') or api_config.get('provider') == 'azure'):
+        raise HTTPException(status_code=400, detail='Anthropic Messages is not supported on Azure OpenAI connections')
+
+    if not is_responses:
+        payload['messages'] = [dict(message) for message in payload.get('messages', [])]
+        for message in payload['messages']:
+            fields_to_clean = [message]
+            if isinstance(message.get('provider_specific_fields'), dict):
+                message['provider_specific_fields'] = dict(message['provider_specific_fields'])
+                fields_to_clean.append(message['provider_specific_fields'])
+            for fields in fields_to_clean:
+                details = fields.get('reasoning_details')
+                items = details if isinstance(details, list) else [details]
+                if any(isinstance(item, dict) and item.get('format') == 'open-webui-responses-v1' for item in items):
+                    remaining = [
+                        item for item in items
+                        if not isinstance(item, dict) or item.get('format') != 'open-webui-responses-v1'
+                    ]
+                    if remaining:
+                        fields['reasoning_details'] = remaining
+                    else:
+                        fields.pop('reasoning_details', None)
 
     # Explicit continuation keeps llama.cpp from echoing the prefill in streamed replies.
     if (
         api_config.get('provider') == 'llama.cpp'
         # These flags apply to Chat Completions, not the Responses API.
         and not is_responses
+        and not is_messages
         # The frontend sends this ID when the user clicks Continue.
         and (metadata or {}).get('assistant_message_id')
         # Tool follow-ups retain the metadata but must start a new assistant turn.
@@ -1539,16 +1640,25 @@ async def generate_chat_completion(
                 request_url = f'{url.rstrip("/")}/chat/completions'
         else:
             api_version = api_config.get('api_version', '2023-03-15-preview')
-            request_url, payload = convert_to_azure_payload(url, payload, api_version)
+            request_url, azure_payload = convert_to_azure_payload(url, dict(payload), api_version)
             headers['api-version'] = api_version
 
             if is_responses:
                 payload = convert_to_responses_payload(payload)
+                payload.pop('model', None)
                 request_url = f'{request_url}/responses?api-version={api_version}'
             else:
+                payload = azure_payload
                 request_url = f'{request_url}/chat/completions?api-version={api_version}'
     else:
-        if is_responses:
+        if is_messages:
+            try:
+                payload = convert_chat_completions_to_anthropic(payload)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            headers = prepare_anthropic_headers(headers, url, key, api_config)
+            request_url = f'{url.rstrip("/")}/messages'
+        elif is_responses:
             payload = convert_to_responses_payload(payload)
             request_url = f'{url}/responses'
         else:
@@ -1556,7 +1666,7 @@ async def generate_chat_completion(
     requested_model = payload.get('model')
     # For Chat Completions, strip image parts from multimodal tool messages
     # (Chat Completions doesn't support images in tool content).
-    if not is_responses and 'messages' in payload:
+    if not is_responses and not is_messages and 'messages' in payload:
         for message in payload['messages']:
             if message.get('role') == 'tool' and isinstance(message.get('content'), list):
                 message['content'] = ''.join(
@@ -1631,7 +1741,10 @@ async def generate_chat_completion(
 
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r),
+                (
+                    _anthropic_stream_wrapper(r)
+                    if is_messages else stream_wrapper(r)
+                ),
                 status_code=r.status,
                 headers=_clean_proxy_headers(r.headers),
             )
@@ -1662,13 +1775,18 @@ async def generate_chat_completion(
             # Convert Responses API result to simple format
             if is_responses and isinstance(response, dict):
                 response = convert_responses_result(response)
+            elif is_messages and isinstance(response, dict):
+                response = convert_anthropic_to_chat_completion(response)
 
             return response
     except Exception as e:
         log.exception(e)
+        error_status = r.status if r is not None else 500
+        if is_messages and error_status < 400:
+            error_status = 502
 
         raise HTTPException(
-            status_code=r.status if r else 500,
+            status_code=error_status,
             detail=ERROR_MESSAGES.SERVER_CONNECTION_ERROR,
         )
     finally:

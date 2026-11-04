@@ -14,15 +14,18 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Download from '../icons/Download.svelte';
 	import CheckIcon from '$lib/components/icons/Check.svelte';
+	import ArchiveIcon from '../icons/Archive.svelte';
 
 	export let align: 'start' | 'end' = 'start';
-	export let onNewChat = () => {};
+	export let onNewChat: (() => void) | null = null;
 	export let onEdit = () => {};
 	export let onExport = () => {};
 	export let onDelete = () => {};
 	export let onCreateSubFolder = () => {};
 	export let onMarkAllRead = () => {};
-
+	export let onRestore = () => {};
+	export let isProject = false;
+	export let projectArchived = false;
 	let show = false;
 </script>
 
@@ -38,7 +41,8 @@
 >
 	<Tooltip content={$i18n.t('More')}>
 		<button
-			aria-label={$i18n.t('Folder options')}
+			type="button"
+			aria-label={isProject ? '项目选项' : $i18n.t('Folder options')}
 			on:click={(e) => {
 				e.stopPropagation();
 				show = !show;
@@ -50,24 +54,27 @@
 
 	<div slot="content">
 		<DropdownMenu className="min-w-[10.625rem]">
-			<button
-				class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
-				on:click={onNewChat}
-			>
-				<EditPencil className="size-3.5" />
-				<div class="flex items-center">{$i18n.t('New Chat')}</div>
-			</button>
+			{#if onNewChat && !projectArchived}
+				<button
+					type="button"
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
+					on:click={onNewChat}
+				>
+					<EditPencil className="size-3.5" />
+					<div class="flex items-center">{$i18n.t('New Chat')}</div>
+				</button>
+			{/if}
 
-			<button
-				class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
-				on:click={() => {
-					onCreateSubFolder();
-				}}
-			>
-				<FolderIcon className="size-3.5" />
-				<div class="flex items-center">{$i18n.t('Create Folder')}</div>
-			</button>
-
+			{#if !isProject}
+				<button
+					type="button"
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
+					on:click={onCreateSubFolder}
+				>
+					<FolderIcon className="size-3.5" />
+					<div class="flex items-center">{$i18n.t('Create Folder')}</div>
+				</button>
+			{/if}
 			<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
 
 			<button
@@ -106,15 +113,26 @@
 
 			<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
 
-			<button
-				class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
-				on:click={() => {
-					onDelete();
-				}}
-			>
-				<TrashIcon className="size-3.5" />
-				<div class="flex items-center">{$i18n.t('Delete')}</div>
-			</button>
+			{#if isProject && projectArchived}
+				<button
+					type="button"
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
+					on:click={onRestore}
+				>
+					<ArchiveIcon className="size-3.5" />
+					<div class="flex items-center">恢复项目</div>
+				</button>
+			{:else}
+				<button
+					type="button"
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
+					on:click={onDelete}
+					title={isProject ? '归档后保留会话和文件，可随时恢复' : undefined}
+				>
+					{#if isProject}<ArchiveIcon className="size-3.5" />{:else}<TrashIcon className="size-3.5" />{/if}
+					<div class="flex items-center">{isProject ? '归档项目' : $i18n.t('Delete')}</div>
+				</button>
+			{/if}
 		</DropdownMenu>
 	</div>
 </Dropdown>

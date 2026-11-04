@@ -336,6 +336,20 @@ def get_reasoning_details(payload: dict):
     return payload.get('reasoning_details') or provider_details
 
 
+def get_replayable_responses_reasoning(item: dict) -> dict | None:
+    if item.get('type') != 'reasoning' or (item.get('attributes') or {}).get('type') == 'reasoning_content':
+        return None
+    native_content = item.get('content') and item.get('id') and not str(item['id']).startswith('r_')
+    if not item.get('encrypted_content') and not native_content:
+        return None
+    result = {
+        key: value for key, value in item.items()
+        if key in {'type', 'id', 'summary', 'encrypted_content', 'content'}
+    }
+    result['summary'] = item['summary'] if isinstance(item.get('summary'), list) else []
+    return result
+
+
 def get_provider_function(item: dict) -> dict:
     """Restore the model's call when OWUI displays and executes a resolved target instead."""
     function = item.get('provider_function')
@@ -437,10 +451,14 @@ def convert_output_to_messages(
         if not pending_tool_outputs:
             return
 
+        known_call_ids = {call['id'] for call in pending_tool_calls}
+        known_call_ids.update(
+            call['id'] for message in messages for call in message.get('tool_calls', [])
+        )
         pending_tool_outputs = [
             result
             for result in pending_tool_outputs
-            if any(call['id'] == result.get('call_id') for call in pending_tool_calls)
+            if result.get('call_id') in known_call_ids
         ]
         flush_pending()
         for output_item in pending_tool_outputs:
@@ -487,7 +505,7 @@ def convert_output_to_messages(
 
         pending_tool_outputs = []
 
-    for item in output:
+    for output_index, item in enumerate(output):
         item_type = item.get('type', '')
         if item_type != 'function_call_output':
             flush_tool_outputs()
@@ -527,7 +545,42 @@ def convert_output_to_messages(
                     detail
                     for detail in reasoning_details
                     if isinstance(detail, dict)
-                    and (detail.get('format') != 'anthropic-claude-v1' or detail.get('signature'))
+                    and (
+                        detail.get('format') != 'anthropic-claude-v1'
+                        or detail.get('signature')
+                        or (detail.get('type') == 'reasoning.encrypted' and detail.get('data'))
+                    )
+                ]
+            native_item = get_replayable_responses_reasoning(item) if raw else None
+            if native_item:
+                following = next(
+                    (candidate for candidate in output[output_index + 1:] if candidate.get('type') != 'reasoning'),
+                    {},
+                )
+                has_following_output = (
+                    following.get('type') == 'message' and any(
+                        part.get('text') for part in following.get('content', [])
+                    )
+                ) or (
+                    following.get('type') == 'function_call'
+                    and following.get('status') in {'completed', 'failed', 'rejected'}
+                )
+                if not has_following_output:
+                    native_item = None
+                else:
+                    flush_pending()
+            has_native_details = any(
+                detail.get('format') == 'open-webui-responses-v1' for detail in reasoning_details or []
+            )
+            if native_item and not has_native_details:
+                reasoning_details = [
+                    *(reasoning_details or []),
+                    {
+                        'type': 'reasoning.encrypted',
+                        'format': 'open-webui-responses-v1',
+                        'index': output_index,
+                        'data': JSONCodec.dumps(native_item),
+                    },
                 ]
             if not reasoning_format and not reasoning_details:
                 continue

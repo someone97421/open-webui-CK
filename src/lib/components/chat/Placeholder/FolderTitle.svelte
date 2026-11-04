@@ -18,6 +18,7 @@
 		createNewFolder
 	} from '$lib/apis/folders';
 	import { getChatsByFolderId } from '$lib/apis/chats';
+	import { getFolderProject, isArchivedProject, isProjectFolder } from '$lib/utils/projects';
 
 	import FolderModal from '$lib/components/layout/Sidebar/Folders/FolderModal.svelte';
 
@@ -39,46 +40,41 @@
 	let showCreateSubFolderModal = false;
 	let showDeleteConfirm = false;
 	let deleteFolderContents = true;
+	$: isProject = isProjectFolder(folder);
+	$: projectArchived = isArchivedProject(folder);
 
 	const updateHandler = async ({ name, meta, data }) => {
 		name = name?.trim();
 		if (!name) {
 			toast.error($i18n.t('Folder name cannot be empty.'));
-			return;
+			return null;
 		}
 
 		const currentName = folder.name;
-
 		folder.name = name;
-
 		const res = await updateFolderById(localStorage.token, folder.id, {
 			name,
 			...(meta ? { meta } : {}),
 			...(data ? { data } : {})
 		}).catch((error) => {
 			toast.error(`${error}`);
-
 			folder.name = currentName;
 			return null;
 		});
+		if (!res) return null;
 
-		if (res) {
-			folder.name = name;
-			if (data) {
-				folder.data = data;
-			}
+		folder.name = name;
+		if (data) folder.data = data;
+		toast.success($i18n.t('Folder updated successfully'));
 
-			toast.success($i18n.t('Folder updated successfully'));
-
-			const _folder = await getFolderById(localStorage.token, folder.id).catch((error) => {
-				toast.error(`${error}`);
-				return null;
-			});
-
-			const updatedFolder = { ...folder, ..._folder };
-			await selectedFolder.set(updatedFolder);
-			onUpdate(updatedFolder);
-		}
+		const latest = await getFolderById(localStorage.token, folder.id).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		const updatedFolder = { ...folder, ...res, ...latest };
+		await selectedFolder.set(updatedFolder);
+		onUpdate(updatedFolder);
+		return updatedFolder;
 	};
 
 	const updateIconHandler = async (iconName) => {
@@ -107,7 +103,33 @@
 		}
 	};
 
+	const setProjectArchived = async (archived) => {
+		const latest = await getFolderById(localStorage.token, folder.id).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		const project = getFolderProject(latest);
+		if (!latest || !project) return null;
+		const data = { ...latest.data, project: { ...project, archived } };
+		const res = await updateFolderById(localStorage.token, folder.id, { data }).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		if (!res) return null;
+		const updatedFolder = { ...latest, ...res, data };
+		folder = updatedFolder;
+		selectedFolder.set(updatedFolder);
+		toast.success(archived ? '项目已归档，会话和文件已保留' : '项目已恢复');
+		if (archived) onDelete(updatedFolder);
+		else onUpdate(updatedFolder);
+		return updatedFolder;
+	};
+
 	const deleteHandler = async () => {
+		if (isProject) {
+			await setProjectArchived(true);
+			return;
+		}
 		const res = await deleteFolderById(localStorage.token, folder.id, deleteFolderContents).catch(
 			(error) => {
 				toast.error(`${error}`);
@@ -166,43 +188,42 @@
 		bind:show={showFolderModal}
 		edit={true}
 		folderId={folder.id}
+		project={isProject}
 		onSubmit={updateHandler}
 	/>
 
-	<FolderModal
-		bind:show={showCreateSubFolderModal}
-		parentId={folder.id}
-		onSubmit={createSubFolderHandler}
-	/>
+	{#if !isProject}
+		<FolderModal
+			bind:show={showCreateSubFolderModal}
+			parentId={folder.id}
+			onSubmit={createSubFolderHandler}
+		/>
+	{/if}
 
 	<DeleteConfirmDialog
 		bind:show={showDeleteConfirm}
-		title={$i18n.t('Delete folder?')}
-		on:confirm={() => {
-			deleteHandler();
-		}}
+		title={isProject ? '归档项目？' : $i18n.t('Delete folder?')}
+		confirmLabel={isProject ? '归档项目' : $i18n.t('Delete')}
+		on:confirm={deleteHandler}
 	>
-		<div class=" text-sm text-gray-700 dark:text-gray-300 flex-1 line-clamp-3 mb-2">
-			<!-- {$i18n.t('This will delete <strong>{{NAME}}</strong> and <strong>all its contents</strong>.', {
-				NAME: folder.name
-			})} -->
-
-			{$i18n.t(`Are you sure you want to delete "{{NAME}}"?`, {
-				NAME: folder.name
-			})}
+		<div class="mb-2 flex-1 text-sm text-gray-700 dark:text-gray-300">
+			{isProject
+				? `归档“${folder.name}”后，会话和文件都会保留，可随时恢复。`
+				: $i18n.t(`Are you sure you want to delete "{{NAME}}"?`, { NAME: folder.name })}
 		</div>
 
-		<div class="flex items-center gap-1.5">
-			<input
-				aria-label={$i18n.t('Delete all contents inside this folder')}
-				type="checkbox"
-				bind:checked={deleteFolderContents}
-			/>
-
-			<div class="text-xs text-gray-500">
-				{$i18n.t('Delete all contents inside this folder')}
+		{#if !isProject}
+			<div class="flex items-center gap-1.5">
+				<input
+					aria-label={$i18n.t('Delete all contents inside this folder')}
+					type="checkbox"
+					bind:checked={deleteFolderContents}
+				/>
+				<div class="text-xs text-gray-500">
+					{$i18n.t('Delete all contents inside this folder')}
+				</div>
 			</div>
-		</div>
+		{/if}
 	</DeleteConfirmDialog>
 
 	<div
@@ -248,10 +269,13 @@
 			</div>
 		</div>
 
-		{#if !readOnly}
+		{#if !readOnly || projectArchived}
 			<div class="flex items-center translate-x-2.5">
 				<FolderMenu
 					align="end"
+					{isProject}
+					{projectArchived}
+					onRestore={() => setProjectArchived(false)}
 					onEdit={() => {
 						showFolderModal = true;
 					}}

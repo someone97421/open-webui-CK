@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
@@ -18,8 +19,9 @@ from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.chat_messages import ChatMessages
 from open_webui.models.chats import (
-    AggregateChatStats,
+    Chat,
     ChatBody,
+    Chat,
     ChatForm,
     ChatHistoryStats,
     ChatImportForm,
@@ -46,7 +48,9 @@ from open_webui.utils.context_compaction import compact_chat_branch, get_chat_co
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import get_message_list
 from open_webui.utils.models import get_all_models
+from open_webui.utils.projects import get_project_for_folder, project_config, validate_project_terminal
 from pydantic import BaseModel
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -251,6 +255,42 @@ async def require_chat_import_permission(request: Request, user, db: AsyncSessio
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+
+async def prepare_project_chat(request: Request, user, folder_id: str | None, chat: dict, db: AsyncSession):
+    project = await get_project_for_folder(folder_id) if folder_id else None
+    if not project:
+        return
+    if not await has_folder_write_access(user.id, project.id, db=db):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
+    config = project_config(project)
+    if config['archived']:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='项目已归档，请先恢复项目再创建聊天')
+    await validate_project_terminal(request, user, config['terminal_id'])
+    params = chat.get('params') or {}
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='聊天 params 必须为对象')
+    chat['params'] = {**params, 'terminal_id': config['terminal_id']}
+
+
+async def get_source_project(chat, db: AsyncSession):
+    folder_id = chat.folder_id
+    if chat.id == chat.share_id:
+        shared = await SharedChats.get_by_id(chat.id, db=db)
+        source = await Chats.get_chat_by_id(shared.chat_id, db=db) if shared else None
+        folder_id = source.folder_id if source else None
+    return await get_project_for_folder(folder_id) if folder_id else None
+
+
+async def require_same_project_scope(source_folder_id: str | None, target_folder_id: str | None):
+    source = await get_project_for_folder(source_folder_id) if source_folder_id else None
+    target = await get_project_for_folder(target_folder_id) if target_folder_id else None
+    if (source.id if source else None) != (target.id if target else None):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='首版暂不支持跨工作区移动聊天；工作区文件将保留，请在目标项目新建聊天',
+        )
+    return target
 
 
 # Get Chat List
@@ -789,6 +829,8 @@ async def create_new_chat(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
+    await prepare_project_chat(request, user, form_data.folder_id, form_data.chat, db)
+
     try:
         set_message_authors(form_data.chat, user)
         chat = await Chats.insert_new_chat(str(uuid4()), user.id, form_data, db=db)
@@ -818,6 +860,12 @@ async def import_chats(
     db: AsyncSession = Depends(get_async_session),
 ):
     await require_chat_import_permission(request, user, db)
+    for chat_form in form_data.chats:
+        if chat_form.folder_id and await get_project_for_folder(chat_form.folder_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='首版暂不支持向项目导入聊天或迁移工作区，请在项目中新建聊天',
+            )
 
     try:
         for chat_form in form_data.chats:
@@ -1112,7 +1160,25 @@ async def get_archived_session_user_chat_count(
 async def archive_all_chats(
     request: Request, user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)
 ):
-    result = await Chats.archive_all_chats_by_user_id(user.id, db=db)
+    folder_ids = list(
+        (await db.execute(select(Chat.folder_id).where(Chat.user_id == user.id, Chat.folder_id.is_not(None)).distinct()))
+        .scalars()
+        .all()
+    )
+    project_folder_ids = [folder_id for folder_id in folder_ids if await get_project_for_folder(folder_id)]
+    if project_folder_ids:
+        await db.execute(
+            update(Chat)
+            .where(Chat.user_id == user.id)
+            .values(
+                archived=True,
+                folder_id=case((Chat.folder_id.in_(project_folder_ids), Chat.folder_id), else_=None),
+            )
+        )
+        await db.commit()
+        result = True
+    else:
+        result = await Chats.archive_all_chats_by_user_id(user.id, db=db)
     if result:
         await publish_event(request, EVENTS.CHAT_ARCHIVED, actor=user, subject_id=user.id, subject_type='user')
     return result
@@ -1808,10 +1874,19 @@ async def fork_chat_by_id(
         'forked_from_message_id': source_message_id,
     }
 
-    # The source chat's folder may no longer be writable by the caller.
-    folder_id = chat.folder_id if is_owner else None
-    if folder_id is not None and not await has_folder_write_access(user.id, folder_id, db=db):
-        folder_id = None
+    project = await get_source_project(chat, db)
+    if project:
+        if is_snapshot:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='首版暂不支持将项目分享快照分叉到普通工作区，请在项目内分叉原聊天',
+            )
+        folder_id = chat.folder_id
+        await prepare_project_chat(request, user, folder_id, updated_chat, db)
+    else:
+        folder_id = chat.folder_id if is_owner else None
+        if folder_id is not None and not await has_folder_write_access(user.id, folder_id, db=db):
+            folder_id = None
 
     fork = await Chats.insert_new_chat(
         str(uuid4()),
@@ -1858,6 +1933,7 @@ async def clone_chat_by_id(
             'branchPointMessageId': chat.chat['history']['currentId'],
             'title': form_data.title if form_data.title else f'Clone of {chat.title}',
         }
+        await prepare_project_chat(request, user, chat.folder_id, updated_chat, db)
 
         chats = await Chats.import_chats(
             user.id,
@@ -1936,6 +2012,12 @@ async def clone_shared_chat_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
+    if await get_source_project(chat, db):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='首版暂不支持将项目聊天分享副本迁移到普通工作区，请在项目内克隆或分叉',
+        )
+
     updated_chat = {
         **(await shared_chat_response(chat, user, db=db))['chat'],
         'originalChatId': chat.id,
@@ -1988,7 +2070,17 @@ async def archive_chat_by_id(
 ):
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
-        chat = await Chats.toggle_chat_archive_by_id(id, db=db)
+        if chat.folder_id and await get_project_for_folder(chat.folder_id):
+            now = int(time.time())
+            await db.execute(
+                update(Chat)
+                .where(Chat.id == id, Chat.user_id == user.id)
+                .values(archived=not chat.archived, updated_at=now, last_read_at=now)
+            )
+            await db.commit()
+            chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
+        else:
+            chat = await Chats.toggle_chat_archive_by_id(id, db=db)
 
         tag_ids = chat.meta.get('tags', [])
         if chat.archived:
@@ -2205,6 +2297,14 @@ async def update_chat_folder_id_by_id(
     chat = await Chats.get_chat_by_id(id, db=db)
     if chat and chat.user_id != user.id:
         if not await has_chat_move_access(user.id, chat.folder_id, form_data.folder_id, db=db):
+            source_folder = (
+                await Folders.get_folder_by_id_and_user_id(chat.folder_id, user.id, db=db) if chat.folder_id else None
+            )
+            if source_folder and (
+                form_data.folder_id is None
+                or await has_folder_write_access(user.id, form_data.folder_id, db=db)
+            ):
+                await require_same_project_scope(chat.folder_id, form_data.folder_id)
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.DEFAULT())
     if chat:
         # None is allowed: it moves the chat out of any folder.
@@ -2213,6 +2313,10 @@ async def update_chat_folder_id_by_id(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=ERROR_MESSAGES.NOT_FOUND,
             )
+
+        project = await require_same_project_scope(chat.folder_id, form_data.folder_id)
+        if project and not await has_folder_write_access(user.id, project.id, db=db):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACCESS_PROHIBITED)
 
         chat = await Chats.update_chat_folder_id_by_id_and_user_id(id, user.id, form_data.folder_id, db=db)
         await publish_event(

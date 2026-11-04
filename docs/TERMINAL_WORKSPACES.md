@@ -1,34 +1,75 @@
-# Open Terminal 会话工作区接入
+# Chat 与项目工作区
 
-本功能需要同时部署本仓库和 `open-terminal-ck` 的对应改动。WebUI 负责确认用户及会话归属，Terminal 负责将文件操作、命令、notebook、HTTP/端口代理和终端 WebSocket 路由到独立工作进程。
+侧栏的“新建 Chat”创建独立聊天，“新建项目”创建绑定一个 Open Terminal 的项目。同项目内的聊天共享文件和项目指令；项目之间保持隔离。原有文件夹保留原样，不自动升级为项目。
 
-## 会话与文件
+## 普通 Chat
 
-普通聊天在第一次访问终端工作区时，先调用现有 `/api/v1/chats/new` 创建空会话。上传、文件面板、终端和首条消息沿用该 ID，不在发送首条消息后改名或迁移目录。多文件并发上传共用同一个会话创建过程。
+普通 Chat 默认启用 Pyodide 代码解释器，仍遵守管理员开关、用户权限和模型能力。聊天模式使用 Pyodide，不使用全局 Jupyter 配置。普通聊天不再绑定 Terminal；旧消息和文件引用保留，旧 Terminal 工作区的磁盘内容不自动搬入浏览器。
 
-临时聊天保留 `temporary:<socket_id>:<uuid>` 身份。访问工作区前调用 `/api/v1/terminals/chats/prepare`，由后端验证已登录用户及实时连接并登记临时归属；不会因此成为普通持久化聊天。临时归属过期后拒绝访问，不回退默认空间。
+浏览器运行环境按 `(user_id, chat_id)` 分配 scope；不同聊天不共用 Python 内存或 `/mnt`。启用文件持久化后，IDBFS 挂载在 `/.chat-workspaces/<编码后的用户>/<编码后的聊天>`，通过 `/mnt` 访问。切换聊天会重建运行环境；包下载仍使用浏览器缓存，Python 变量不跨聊天保留。运行中的请求捕获原 scope，后台返回不修改当前聊天的文件面板。
 
-WebUI 后端对每个带会话身份的终端请求重新查验写权限。原生 Bearer 终端连接通过现有 API Key 签发有效期最多 300 秒的 HMAC 工作区上下文，覆盖上传下载、模型工具、HTTP 和 WebSocket 代理。模型工具每次执行重新签名，审批等待或长对话不会复用已过期的签名。API Key 与签名不交给浏览器或模型。
+上传或首次执行前应使用最终聊天 ID。新聊天经现有 `/api/v1/chats/new` 预建，后续首条消息沿用该 ID。临时聊天不使用持久化文件；未落库草稿只使用内存 scope。旧版全站共享的 `/mnt` 数据不自动归入任何聊天，避免猜测文件归属。
 
-Terminal 按 `/workspaces/<SHA256(user_id)>/<SHA256(chat_id)>/` 保留文件。不同用户、不同会话使用不同目录和进程；回到原会话使用原目录。共享聊天中各用户也拥有各自的工作区。Fork/Clone 使用新会话 ID，因此不会自动复制原会话的磁盘文件；历史中的终端文件引用需要在新会话重新上传。
+这属于浏览器应用内的运行环境与文件命名空间隔离。启用 IDBFS 的 Worker 与页面使用同源存储，具备任意 JavaScript 能力的代码仍可访问同源浏览器资源；它不提供 Terminal 的 Linux 沙箱边界，也不把模块导入限制视为安全沙箱。
 
-## 部署
+## 项目
 
-在 Terminal 服务端设置：
+项目复用文件夹记录，配置为：
+
+```json
+{"data":{"project":{"version":1,"terminal_id":"连接 ID","archived":false}}}
+```
+
+项目必须位于顶层，不能包含子文件夹。已有非空文件夹不能直接升级。项目聊天不能临时运行，依赖临时会话的 Side chat 入口在项目中关闭；需要并行讨论时在同项目内新建 Chat。聊天不能从普通区移动到项目，不能跨项目移动；Fork/Clone 留在原项目中，因此沿用原项目的磁盘文件。普通聊天 Fork/Clone 仍使用新的独立 scope。
+
+WebUI 服务端从已保存聊天的数据库 `folder_id` 解析项目归属，校验项目写权限、归档状态和 Terminal 访问权限，再固定使用项目连接并关闭代码解释器。客户端传入的 `terminal_id` 不能覆盖项目绑定。有聊天的项目不能更换 Terminal 或撤销项目配置。
+
+删除项目会返回 409，使用归档代替。归档项目及其中聊天保留项目归属和文件；恢复后继续使用原工作区。项目导入与共享快照跨工作区克隆首版返回 409，不自动迁移文件。删除聊天不会清理项目磁盘。
+
+### 项目 AGENTS.md
+
+项目设置的编辑器通过以下接口直接读写工作区根目录的 `AGENTS.md`，不存在时显示为空：
+
+- `GET /api/v1/terminals/projects/{project_id}/agents`
+- `PUT /api/v1/terminals/projects/{project_id}/agents`，请求和响应均为 `{"content":"..."}`。
+
+文本上限为 32 KiB，权限与项目写权限一致；归档项目可查看，恢复后才能保存。每轮模型请求重新读取同一个文件；不复制到文件夹 `system_prompt`。项目成员共享此文件，保存后下轮对话生效。
+
+## Terminal 部署与协议
+
+需要同时升级 WebUI 和 `open-terminal-ck`。项目仅支持管理员配置的 Bearer 直连 Open Terminal，不支持个人浏览器直连或 orchestrator。项目创建、绑定和实际请求都会验证 `/api/config` 中的 `workspace_isolation`、`project_workspaces`、v2 协议和 project scope，旧服务返回明确的 409。
+
+Terminal 配置：
 
 ```dotenv
 OPEN_TERMINAL_WORKSPACE_ISOLATION=true
 OPEN_TERMINAL_WORKSPACE_ROOT=/workspaces
 ```
 
-为 `/workspaces` 挂载持久卷；WebUI 管理员终端连接使用该服务地址、Bearer 认证和与 `OPEN_TERMINAL_API_KEY` 相同的 Key。使用 WebUI 后端代理连接；个人浏览器直连无法签发可信会话身份。无需在 WebUI 增加密钥或额外签名开关。
+为 `/workspaces` 挂载持久卷。WebUI 连接 Key 与现有 `OPEN_TERMINAL_API_KEY` 一致，无需增加密钥。依赖使用镜像内只读的系统目录；额外共享虚拟环境通过 `OPEN_TERMINAL_WORKSPACE_RUNTIME_PATHS` 配置，项目自行安装的依赖只保留在自己的目录。
 
-所有人共享镜像内只读的系统工具和依赖。额外共享虚拟环境通过 Terminal 的 `OPEN_TERMINAL_WORKSPACE_RUNTIME_PATHS` 配置，其 `bin` 会加入工作区 PATH；共享依赖由管理员统一安装，工作区自行安装的依赖只属于当前工作区。Python 解释器及项目包必须安装在沙箱可见的共享运行时中。
+项目目录为 `/workspaces/<SHA256(project_owner)>/project-<SHA256(project_id)>/`。同项目成员和聊天复用一个工作进程、同一目录；终端 shell、notebook 和请求的 `X-Session-Id` 仍使用真实聊天 ID，防止不同聊天混用实时会话。
 
-Terminal 需要 Linux 和可用的 bubblewrap/user namespace。隔离模式默认不提供外网；`OPEN_TERMINAL_WORKSPACE_NETWORK=shared` 可复用外网，但会放开工作区之间的网络可达性，应根据实际部署选择。隔离模式当前关闭 browser/desktop；不修改旧单用户或用户级模式的开关。
+WebUI 对每次上传下载、工具调用、HTTP/WS 代理重新校验权限并签发最长 300 秒的 HMAC。v2 签名包含 `user`、真实 `chat`、`scope_type: project`、`scope_id` 和项目 `owner`，签名前缀为 `open-terminal/workspace/v2`。服务端项目设置使用受限的 `project:<id>` 上下文，仅用于读写指令。浏览器和模型不能自行选择此上下文。
 
-已有共享目录不会自动迁移。先备份旧卷，再按真实用户和会话分配到对应目录，不能从旧文件路径猜测归属。Terminal 仓库的 `docs/WORKSPACE_IMAGE_CONTEXT.md` 记录了目录、运行时、迁移和协议细节。
+v1 的用户＋聊天签名与 `/workspaces/<SHA256(user)>/<SHA256(chat)>/` 路径继续兼容。旧工作区数据保留，不自动搬迁。其他非聊天入口沿用各自的原有连接配置。
 
-## 验收范围
+Terminal 需要 Linux、bubblewrap 和允许 user namespace 的容器策略。隔离模式默认不提供外网；`OPEN_TERMINAL_WORKSPACE_NETWORK=shared` 可联网，但同时放开网络互达。隔离模式关闭 browser/desktop。详细部署、共享依赖与图片行为见 Terminal 仓库的 `docs/WORKSPACE_IMAGE_CONTEXT.md`。
 
-此次只做源码静态审查、语法与差异检查，未启动服务、运行测试、CI 或构建镜像。部署后仍需验证：首条消息前多文件上传、临时聊天上传、两用户各两会话互相不可见、回到原会话及服务重启后文件恢复、终端 WebSocket 和 notebook 使用同一目录、长时间等待后的工具调用，以及共享依赖可用且不能被工作区改写。
+## 验证范围
+
+本次只进行源码静态审核、Python AST / Svelte / TypeScript 语法、UTF-8 与差异检查。未运行测试、服务、CI、构建或镜像构建。
+
+部署后仍需实测：普通聊天首次上传与回访恢复、临时聊天不持久化、切换聊天期间后台执行、同项目多聊天共享文件、不同项目隔离、项目协作者权限、AGENTS.md 修改后下轮加载、归档恢复，以及目标宿主的 bubblewrap 能力。
+
+## 对话中的文件链接
+
+聊天正文中的 `/mnt/...`、常见工作区绝对路径、相对文件路径、旧 `sandbox:` / `file:` 引用，以及本站 WebUI 文件与 Terminal 文件 API 链接，会打开文件预览弹窗，可直接下载。普通网页链接仍按原方式打开。链接只引用实际存在的文件，不会把远程模型服务的沙箱文件自动搬到本机。
+
+普通 Chat 按消息的聊天 ID 读取对应 Pyodide scope；相对文件路径以 `/mnt/uploads/` 为基准。项目按项目绑定的 Terminal 解析路径，相对路径使用该聊天的工作目录。显式 Terminal 链接保留自身的连接和聊天 ID；每次访问仍由后端检查权限和项目绑定。旧文件卡片无需当前选中相同 Terminal 即可预览下载。
+
+Pyodide 文件初始只在当前浏览器。在预览中点击“保存到文件库并复制链接”，会通过原有文件上传接口保存原文件（不做知识提取），然后复制 WebUI 文件地址；其他设备登录有权限的账号后可打开。文件库链接和管理员 Terminal 代理链接也可从预览中复制。链接不携带 JWT 或 Terminal 密钥，沿用现有登录与文件权限；不提供匿名公开分享。
+
+管理员 Terminal 的 HTML 预览始终使用带聊天 ID 的代理路径，避免 iframe 无法传会话请求头。文件代理转发 Range / If-Range，保留分段响应能力。缺失文件、连接不可用、读取或复制失败通过 toast 提示；不再把本地路径作为 WebUI 网页导航。
+
+本轮仅静态核验；正文链接、跨设备保存与复制、HTML 相对资源及媒体分段读取仍需部署后实测。

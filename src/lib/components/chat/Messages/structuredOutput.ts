@@ -551,6 +551,25 @@ function findOutputItemIndex(output: OutputItem[], item: OutputItem): number {
 	);
 }
 
+function mergeReasoningOutputItem(item: OutputItem, previous?: OutputItem): OutputItem {
+	if (
+		item.type !== 'reasoning' ||
+		previous?.type !== 'reasoning' ||
+		(item.id && previous.id && item.id !== previous.id)
+	) {
+		return item;
+	}
+
+	const merged = { ...item };
+	if ((!merged.summary || merged.summary.length === 0) && previous.summary) {
+		merged.summary = previous.summary;
+	}
+	if (!merged.encrypted_content && previous.encrypted_content) {
+		merged.encrypted_content = previous.encrypted_content;
+	}
+	return merged;
+}
+
 function responseEventUpdatesOutputItem(eventType: string): boolean {
 	return (
 		eventType === 'response.content_part.added' ||
@@ -560,7 +579,48 @@ function responseEventUpdatesOutputItem(eventType: string): boolean {
 	);
 }
 
+const responseOutputState = new WeakMap<
+	OutputItem[],
+	{ items: Set<OutputItem>; completed: boolean }
+>();
+
 export function applyResponseStreamEvent(
+	output: OutputItem[] = [],
+	event: ResponseStreamEvent
+): OutputItem[] {
+	if (event?.type === 'response.created') {
+		responseOutputState.set(output, { items: new Set(), completed: false });
+		return output;
+	}
+
+	const state = responseOutputState.get(output);
+	const nextOutput = applyResponseEvent(output, event);
+	if (event?.type === 'response.completed' || event?.type === 'response.incomplete') {
+		const currentItems = state?.items ?? new Set(output);
+		const previousItems = new Set(output.filter((item) => !currentItems.has(item)));
+		responseOutputState.set(nextOutput, {
+			items: new Set(nextOutput.filter((item) => !previousItems.has(item))),
+			completed: true
+		});
+	} else if (nextOutput !== output) {
+		const startsResponse =
+			state?.completed &&
+			event?.type === 'response.output_item.added' &&
+			event.item &&
+			findOutputItemIndex(output, event.item) < 0;
+		const currentItems = startsResponse
+			? new Set<OutputItem>()
+			: (state?.items ?? new Set(output));
+		const previousItems = new Set(output);
+		responseOutputState.set(nextOutput, {
+			items: new Set(nextOutput.filter((item) => currentItems.has(item) || !previousItems.has(item))),
+			completed: !!state?.completed && !startsResponse
+		});
+	}
+	return nextOutput;
+}
+
+function applyResponseEvent(
 	output: OutputItem[] = [],
 	event: ResponseStreamEvent
 ): OutputItem[] {
@@ -569,18 +629,20 @@ export function applyResponseStreamEvent(
 		return output;
 	}
 
-	if (eventType === 'response.completed') {
+	if (eventType === 'response.completed' || eventType === 'response.incomplete') {
 		if (!event.response?.output?.length) return output;
 
-		// Completion covers one provider response, not the earlier tool-call rounds.
-		const nextOutput = [...output];
-		for (const item of event.response.output) {
-			const index = findOutputItemIndex(nextOutput, item);
-			if (index >= 0) {
-				nextOutput[index] = item;
-			} else {
-				nextOutput.push(item);
-			}
+		// 最终 output 只覆盖当前响应，保留此前的工具续聊轮次。
+		const currentItems = responseOutputState.get(output)?.items ?? new Set(output);
+		const currentOutput = output.filter((item) => currentItems.has(item));
+		const nextOutput = output.filter((item) => !currentItems.has(item));
+		for (const [outputIndex, item] of event.response.output.entries()) {
+			const index = findOutputItemIndex(currentOutput, item);
+			const previous = index >= 0 ? currentOutput[index] : currentOutput[outputIndex];
+			const finalItem = mergeReasoningOutputItem(item, previous);
+			nextOutput.push(
+				finalItem.type === 'reasoning' ? { ...finalItem, status: 'completed' } : finalItem
+			);
 		}
 		return nextOutput;
 	}
@@ -615,9 +677,9 @@ export function applyResponseStreamEvent(
 		const item = { ...event.item };
 		const existingIndex = findOutputItemIndex(nextOutput, item);
 		if (existingIndex >= 0) {
-			nextOutput[existingIndex] = item;
+			nextOutput[existingIndex] = mergeReasoningOutputItem(item, nextOutput[existingIndex]);
 		} else if (outputIndex < nextOutput.length) {
-			nextOutput[outputIndex] = item;
+			nextOutput[outputIndex] = mergeReasoningOutputItem(item, nextOutput[outputIndex]);
 		} else {
 			nextOutput.push(item);
 		}
@@ -625,6 +687,20 @@ export function applyResponseStreamEvent(
 	}
 
 	if (!responseEventUpdatesOutputItem(eventType)) {
+		return output;
+	}
+
+	const summaryDone =
+		eventType === 'response.reasoning_summary_text.done' ||
+		eventType === 'response.reasoning_summary_part.done';
+	if (
+		summaryDone &&
+		(outputIndex < 0 ||
+			(event.summary_index ?? 0) < 0 ||
+			(eventType === 'response.reasoning_summary_text.done'
+				? event.text === undefined
+				: !event.part))
+	) {
 		return output;
 	}
 
@@ -639,6 +715,10 @@ export function applyResponseStreamEvent(
 		role: 'assistant',
 		content: []
 	});
+
+	if (summaryDone && item.type !== 'reasoning') {
+		return output;
+	}
 
 	if (eventType === 'response.content_part.added') {
 		if (item.type === 'reasoning' || !event.part) {
@@ -692,6 +772,20 @@ export function applyResponseStreamEvent(
 			item.content = [...(item.content ?? [])];
 			const contentIndex = event.content_index ?? Math.max(item.content.length - 1, 0);
 			setPart(item.content, contentIndex, { ...event.part });
+		} else if (typeName === 'reasoning_summary_part' && event.part) {
+			item.summary = Array.isArray(item.summary) ? [...item.summary] : [];
+			setPart(item.summary, event.summary_index ?? 0, { ...event.part }, {
+				type: 'summary_text',
+				text: ''
+			});
+		} else if (typeName === 'reasoning_summary_text' && event.text !== undefined) {
+			item.summary = Array.isArray(item.summary) ? [...item.summary] : [];
+			const part = ensurePart(item.summary, event.summary_index ?? 0, {
+				type: 'summary_text',
+				text: ''
+			});
+			part.text = event.text;
+			item.status = 'completed';
 		} else if (typeName === 'function_call_arguments' && event.arguments !== undefined) {
 			item.arguments = event.arguments;
 		} else if (

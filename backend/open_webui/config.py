@@ -473,7 +473,8 @@ CODE_INTERPRETER_PYODIDE_PROMPT = """
 ##### Persistent File System
 
 - User-uploaded files are available at `/mnt/uploads/`. When the user asks you to work with their files, read from this directory.
-- You can also write output files to `/mnt/uploads/` so the user can access and download them from the file browser.
+- Write output files to `/mnt/uploads/` and provide a Markdown link using the actual path, e.g. `[Download report](/mnt/uploads/report.xlsx)`. The chat opens file links for preview and download. Only link files that your code actually created; never invent public URLs or localhost links.
+- These files belong to this browser and chat. The user can save a file to the WebUI file library from its preview and copy a link for another device; do not claim a local path is already a public download URL.
 - The file system persists across code executions within the same session.
 - Use `import os; os.listdir('/mnt/uploads')` to discover available files."""
 

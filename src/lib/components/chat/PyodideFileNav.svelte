@@ -1,11 +1,10 @@
-<script context="module">
-	let savedPyodidePath = '/mnt/uploads';
-</script>
-
 <script lang="ts">
 	import { getContext, onMount, onDestroy, tick } from 'svelte';
-	import { pyodideWorker } from '$lib/stores';
-	import { createPyodideWorker } from '$lib/pyodide/createPyodideWorker';
+	import {
+		createPyodideWorker,
+		getPyodideScope,
+		type PyodideScope
+	} from '$lib/pyodide/createPyodideWorker';
 	import type { FileEntry } from '$lib/apis/terminal';
 
 	import FileNavToolbar from './FileNav/FileNavToolbar.svelte';
@@ -17,117 +16,112 @@
 	import Document from '../icons/Document.svelte';
 
 	const i18n = getContext('i18n');
-
 	export let overlay = false;
 
-	// State
-	let currentPath = savedPyodidePath;
+	type Context = { scope: PyodideScope; generation: number; path: string };
+	type NavEntry = { path: string; file: string | null };
+	let activeScope: PyodideScope | null = null;
+	let scopeGeneration = 0;
+	let viewGeneration = 0;
+	let disposed = false;
+	const pendingRequests = new Set<() => void>();
+
+	let currentPath = '/mnt/uploads';
 	let entries: FileEntry[] = [];
 	let loading = false;
 	let error: string | null = null;
-
 	let selectedFile: string | null = null;
 	let fileLoading = false;
 	let fileContent: string | null = null;
 	let fileImageUrl: string | null = null;
-
 	let isDragOver = false;
 	let showDeleteConfirm = false;
 	let deletePath = '';
 	let deleteName = '';
-
+	let deleteContext: Context | null = null;
 	let creatingFolder = false;
 	let newFolderName = '';
 	let newFolderInput: HTMLInputElement;
-
 	let creatingFile = false;
 	let newFileName = '';
 	let newFileInput: HTMLInputElement;
-
-	// Navigation history
-	type NavEntry = { path: string; file: string | null };
 	let navHistory: NavEntry[] = [];
 	let navIndex = -1;
-	let navigatingHistory = false;
 
 	$: canGoBack = navIndex > 0;
 	$: canGoForward = navIndex < navHistory.length - 1;
 
-	const pushNavHistory = (path: string, file: string | null = null) => {
-		if (navigatingHistory) return;
-		const current = navHistory[navIndex];
-		if (current && current.path === path && current.file === file) return;
-		if (navIndex < navHistory.length - 1) {
-			navHistory = navHistory.slice(0, navIndex + 1);
-		}
-		navHistory = [...navHistory, { path, file }];
-		navIndex = navHistory.length - 1;
-	};
-
-	const goBack = async () => {
-		if (!canGoBack) return;
-		navigatingHistory = true;
-		navIndex -= 1;
-		const entry = navHistory[navIndex];
-		await loadDir(entry.path);
-		if (entry.file) {
-			const fileName = entry.file.split('/').pop() ?? '';
-			await openEntry({ name: fileName, type: 'file', size: 0 });
-		}
-		navigatingHistory = false;
-	};
-
-	const goForward = async () => {
-		if (!canGoForward) return;
-		navigatingHistory = true;
-		navIndex += 1;
-		const entry = navHistory[navIndex];
-		await loadDir(entry.path);
-		if (entry.file) {
-			const fileName = entry.file.split('/').pop() ?? '';
-			await openEntry({ name: fileName, type: 'file', size: 0 });
-		}
-		navigatingHistory = false;
-	};
-
-	let _reqId = 0;
-
 	const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'ico', 'avif']);
 	const isImage = (path: string) => IMAGE_EXTS.has(path.split('.').pop()?.toLowerCase() ?? '');
 
-	// Worker management
+	const isCurrent = (context: Context) => {
+		if (disposed || context.generation !== scopeGeneration || activeScope !== context.scope) return false;
+		const scope = getPyodideScope();
+		return !!scope.userId && scope.key === context.scope.key && scope.generation === context.scope.generation;
+	};
+	const captureContext = (): Context | null => {
+		if (!activeScope) return null;
+		const context = { scope: activeScope, generation: scopeGeneration, path: currentPath };
+		return isCurrent(context) ? context : null;
+	};
+	const isCurrentView = (context: Context, generation: number) =>
+		isCurrent(context) && generation === viewGeneration;
 
-	function ensureWorker(): Worker {
-		let worker = $pyodideWorker;
-		if (!worker) {
-			worker = createPyodideWorker();
-			pyodideWorker.set(worker);
-		}
-		return worker;
-	}
-
-	function sendWorkerMessage(msg: any): Promise<any> {
-		const worker = ensureWorker();
-		const id = `fs-${++_reqId}`;
+	function sendWorkerMessage(msg: any, context: Context): Promise<any> {
+		if (!isCurrent(context)) return Promise.reject(new Error('Python context changed'));
+		const worker = createPyodideWorker(context.scope);
+		const id = `fs-${crypto.randomUUID()}`;
 		return new Promise((resolve, reject) => {
-			const timeout = setTimeout(() => {
+			let settled = false;
+			const cleanup = () => {
+				pendingRequests.delete(cancel);
 				worker.removeEventListener('message', handler);
-				reject('Timeout');
-			}, 30000);
-
-			function handler(event: MessageEvent) {
-				if (event.data?.id !== id) return;
-				clearTimeout(timeout);
-				worker.removeEventListener('message', handler);
+				worker.terminate();
+			};
+			const fail = (reason: unknown) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(reason instanceof Error ? reason : new Error(String(reason)));
+			};
+			const cancel = () => fail('Python context changed');
+			const handler = (event: MessageEvent) => {
+				if (event.data?.id !== id || settled) return;
+				if (!isCurrent(context)) return cancel();
+				if (event.data.error || event.data.success === false) {
+					return fail(event.data.error || event.data.stderr || 'Python filesystem error');
+				}
+				settled = true;
+				cleanup();
 				resolve(event.data);
-			}
-
+			};
+			pendingRequests.add(cancel);
 			worker.addEventListener('message', handler);
-			worker.postMessage({ ...msg, id });
+			try {
+				worker.postMessage({ ...msg, id });
+			} catch (error) {
+				fail(error);
+			}
 		});
 	}
 
-	// Breadcrumbs
+	const pushNavHistory = (path: string, file: string | null = null) => {
+		const current = navHistory[navIndex];
+		if (current && current.path === path && current.file === file) return;
+		navHistory = [...navHistory.slice(0, navIndex + 1), { path, file }];
+		navIndex = navHistory.length - 1;
+	};
+	const navigateHistory = async (offset: number) => {
+		const context = captureContext();
+		const entry = navHistory[navIndex + offset];
+		if (!context || !entry) return;
+		navIndex += offset;
+		const generation = await loadDir(entry.path, false);
+		if (generation === null || !isCurrentView(context, generation) || !entry.file) return;
+		await openEntry({ name: entry.file.split('/').pop() ?? '', type: 'file', size: 0 }, false);
+	};
+	const goBack = () => navigateHistory(-1);
+	const goForward = () => navigateHistory(1);
 
 	const buildBreadcrumbs = (path: string) => {
 		const parts = path.split('/').filter(Boolean);
@@ -140,185 +134,195 @@
 			[{ label: '/', path: '/' }]
 		);
 	};
-
 	$: breadcrumbs = buildBreadcrumbs(currentPath);
 
-	// Operations
+	const clearPreview = () => {
+		fileContent = null;
+		if (fileImageUrl) URL.revokeObjectURL(fileImageUrl);
+		fileImageUrl = null;
+	};
 
-	const loadDir = async (path: string) => {
+	const loadDir = async (path: string, rememberHistory = true): Promise<number | null> => {
+		const context = captureContext();
+		if (!context) return null;
+		const generation = ++viewGeneration;
 		loading = true;
+		fileLoading = false;
 		error = null;
+		entries = [];
 		selectedFile = null;
 		clearPreview();
 		currentPath = path.endsWith('/') ? path : path + '/';
-		savedPyodidePath = currentPath;
-		pushNavHistory(currentPath);
-
+		if (rememberHistory) pushNavHistory(currentPath);
 		try {
 			const res = await sendWorkerMessage({
-				type: 'fs:list',
-				path: currentPath.replace(/\/$/, '') || '/'
-			});
+				type: 'fs:list', path: currentPath.replace(/\/$/, '') || '/'
+			}, context);
+			if (!isCurrentView(context, generation)) return null;
 			entries = (res.entries || []).sort((a: FileEntry, b: FileEntry) => {
 				if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
 				return a.name.localeCompare(b.name);
 			});
+			return generation;
 		} catch {
-			error = 'Failed to list directory';
-			entries = [];
+			if (isCurrentView(context, generation)) {
+				error = 'Failed to list directory';
+				entries = [];
+			}
+			return null;
+		} finally {
+			if (isCurrentView(context, generation)) loading = false;
 		}
-		loading = false;
 	};
 
-	const openEntry = async (entry: FileEntry) => {
+	const openEntry = async (entry: FileEntry, rememberHistory = true) => {
+		const context = captureContext();
+		if (!context) return;
 		if (entry.type === 'directory') {
-			await loadDir(`${currentPath}${entry.name}/`);
+			await loadDir(`${context.path}${entry.name}/`, rememberHistory);
 			return;
 		}
-
-		const filePath = `${currentPath}${entry.name}`;
-		pushNavHistory(currentPath, filePath);
+		const generation = ++viewGeneration;
+		const filePath = `${context.path}${entry.name}`;
+		if (rememberHistory) pushNavHistory(context.path, filePath);
 		selectedFile = filePath;
+		loading = false;
 		fileLoading = true;
 		clearPreview();
-
 		try {
-			const res = await sendWorkerMessage({ type: 'fs:read', path: filePath });
-			if (res.error) {
-				fileContent = `Error: ${res.error}`;
-			} else if (isImage(filePath)) {
-				const blob = new Blob([res.data]);
-				fileImageUrl = URL.createObjectURL(blob);
+			const res = await sendWorkerMessage({ type: 'fs:read', path: filePath }, context);
+			if (!isCurrentView(context, generation)) return;
+			if (isImage(filePath)) {
+				fileImageUrl = URL.createObjectURL(new Blob([res.data]));
 			} else {
-				const decoder = new TextDecoder('utf-8', { fatal: true });
 				try {
-					fileContent = decoder.decode(res.data);
+					fileContent = new TextDecoder('utf-8', { fatal: true }).decode(res.data);
 				} catch {
 					fileContent = `[Binary file: ${entry.size ?? 0} bytes]`;
 				}
 			}
 		} catch {
-			fileContent = 'Failed to read file';
-		}
-		fileLoading = false;
-	};
-
-	const clearPreview = () => {
-		fileContent = null;
-		if (fileImageUrl) {
-			URL.revokeObjectURL(fileImageUrl);
-			fileImageUrl = null;
+			if (isCurrentView(context, generation)) fileContent = 'Failed to read file';
+		} finally {
+			if (isCurrentView(context, generation)) fileLoading = false;
 		}
 	};
 
 	const downloadFile = async (path: string) => {
+		const context = captureContext();
+		if (!context) return;
 		try {
-			const res = await sendWorkerMessage({ type: 'fs:read', path });
-			if (res.data) {
-				const blob = new Blob([res.data]);
-				const url = URL.createObjectURL(blob);
-				const a = document.createElement('a');
-				a.href = url;
-				a.download = path.split('/').pop() ?? 'file';
-				a.click();
-				URL.revokeObjectURL(url);
-			}
-		} catch (e) {
-			console.error('Download failed:', e);
+			const res = await sendWorkerMessage({ type: 'fs:read', path }, context);
+			if (!isCurrent(context) || !res.data) return;
+			const url = URL.createObjectURL(new Blob([res.data]));
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = path.split('/').pop() ?? 'file';
+			a.click();
+			URL.revokeObjectURL(url);
+		} catch (error) {
+			if (isCurrent(context)) console.error('Download failed:', error);
 		}
 	};
 
 	const confirmDelete = (path: string, name: string) => {
+		deleteContext = captureContext();
+		if (!deleteContext) return;
 		deletePath = path;
 		deleteName = name;
 		showDeleteConfirm = true;
 	};
-
 	const doDelete = async () => {
+		const context = deleteContext;
+		const path = deletePath;
+		const generation = viewGeneration;
+		if (!context || !isCurrent(context)) return;
 		try {
-			await sendWorkerMessage({ type: 'fs:delete', path: deletePath });
-			if (selectedFile === deletePath) {
-				selectedFile = null;
-				clearPreview();
-			}
-			await loadDir(currentPath);
-		} catch (e) {
-			console.error('Delete failed:', e);
+			await sendWorkerMessage({ type: 'fs:delete', path }, context);
+			if (isCurrentView(context, generation) && currentPath === context.path) await loadDir(context.path);
+		} catch (error) {
+			if (isCurrent(context)) console.error('Delete failed:', error);
 		}
 	};
 
 	const startNewFolder = async () => {
+		const context = captureContext();
+		const generation = viewGeneration;
+		if (!context) return;
 		creatingFolder = true;
 		newFolderName = '';
 		await tick();
-		newFolderInput?.focus();
+		if (isCurrentView(context, generation) && creatingFolder) newFolderInput?.focus();
 	};
-
 	const submitNewFolder = async () => {
+		const context = captureContext();
+		const generation = viewGeneration;
 		const name = newFolderName.trim();
 		creatingFolder = false;
 		newFolderName = '';
-		if (!name) return;
-		const folderPath = `${currentPath}${name}`.replace(/\/$/, '');
+		if (!context || !name) return;
+		const path = `${context.path}${name}`.replace(/\/$/, '');
 		try {
-			await sendWorkerMessage({ type: 'fs:mkdir', path: folderPath });
-			await loadDir(currentPath);
-		} catch (e) {
-			console.error('Failed to create folder:', e);
+			await sendWorkerMessage({ type: 'fs:mkdir', path }, context);
+			if (isCurrentView(context, generation)) await loadDir(context.path);
+		} catch (error) {
+			if (isCurrent(context)) console.error('Failed to create folder:', error);
 		}
 	};
 
 	const startNewFile = async () => {
+		const context = captureContext();
+		const generation = viewGeneration;
+		if (!context) return;
 		creatingFile = true;
 		newFileName = '';
 		await tick();
-		newFileInput?.focus();
+		if (isCurrentView(context, generation) && creatingFile) newFileInput?.focus();
 	};
-
 	const submitNewFile = async () => {
+		const context = captureContext();
+		const generation = viewGeneration;
 		const name = newFileName.trim();
 		creatingFile = false;
 		newFileName = '';
-		if (!name) return;
+		if (!context || !name) return;
 		try {
 			await sendWorkerMessage({
-				type: 'fs:upload',
-				files: [{ name, data: new ArrayBuffer(0) }],
-				dir: currentPath.replace(/\/$/, '') || '/'
-			});
-			await loadDir(currentPath);
-		} catch (e) {
-			console.error('Failed to create file:', e);
+				type: 'fs:upload', files: [{ name, data: new ArrayBuffer(0) }],
+				dir: context.path.replace(/\/$/, '') || '/'
+			}, context);
+			if (isCurrentView(context, generation)) await loadDir(context.path);
+		} catch (error) {
+			if (isCurrent(context)) console.error('Failed to create file:', error);
 		}
 	};
 
 	const uploadFiles = async (fileList: File[]) => {
-		const payloads: { name: string; data: ArrayBuffer }[] = [];
-		for (const file of fileList) {
-			payloads.push({ name: file.name, data: await file.arrayBuffer() });
-		}
+		const context = captureContext();
+		const generation = viewGeneration;
+		if (!context) return;
 		try {
+			const payloads: { name: string; data: ArrayBuffer }[] = [];
+			for (const file of fileList) {
+				const data = await file.arrayBuffer();
+				if (!isCurrent(context)) return;
+				payloads.push({ name: file.name, data });
+			}
 			await sendWorkerMessage({
-				type: 'fs:upload',
-				files: payloads,
-				dir: currentPath.replace(/\/$/, '') || '/'
-			});
-		} catch (e) {
-			console.error('Upload failed:', e);
+				type: 'fs:upload', files: payloads, dir: context.path.replace(/\/$/, '') || '/'
+			}, context);
+			if (isCurrentView(context, generation)) await loadDir(context.path);
+		} catch (error) {
+			if (isCurrent(context)) console.error('Upload failed:', error);
 		}
-		await loadDir(currentPath);
 	};
 
-	// Drag and drop
-
 	const handleDragOver = (e: DragEvent) => {
-		if (selectedFile) return;
-		if (!e.dataTransfer?.types.includes('Files')) return;
+		if (selectedFile || !captureContext() || !e.dataTransfer?.types.includes('Files')) return;
 		e.preventDefault();
 		e.stopPropagation();
 		isDragOver = true;
 	};
-
 	const handleDrop = async (e: DragEvent) => {
 		e.preventDefault();
 		e.stopPropagation();
@@ -328,22 +332,65 @@
 		if (droppedFiles.length) await uploadFiles(droppedFiles);
 	};
 
-	// Lifecycle
-
-	const onFilesChanged = async () => {
+	const refreshView = async (preserveFile = false) => {
+		const context = captureContext();
+		const generation = viewGeneration;
+		const file = selectedFile;
+		if (!context) return;
 		try {
-			await sendWorkerMessage({ type: 'fs:sync' });
-		} catch {}
-		loadDir(currentPath);
+			await sendWorkerMessage({ type: 'fs:sync' }, context);
+			if (!isCurrentView(context, generation)) return;
+			if (preserveFile && file) {
+				await openEntry({ name: file.split('/').pop() ?? '', type: 'file', size: 0 });
+			} else {
+				await loadDir(context.path);
+			}
+		} catch (error) {
+			if (isCurrentView(context, generation)) console.error('Refresh failed:', error);
+		}
+	};
+	const onFilesChanged = () => void refreshView();
+	const onScopeChanged = () => {
+		if (disposed) return;
+		const scope = getPyodideScope();
+		if (activeScope?.key === scope.key && activeScope.generation === scope.generation) return;
+		++scopeGeneration;
+		++viewGeneration;
+		activeScope = scope;
+		for (const cancel of [...pendingRequests]) cancel();
+		clearPreview();
+		currentPath = '/mnt/uploads';
+		entries = [];
+		selectedFile = null;
+		loading = false;
+		fileLoading = false;
+		error = null;
+		isDragOver = false;
+		showDeleteConfirm = false;
+		deletePath = '';
+		deleteName = '';
+		deleteContext = null;
+		creatingFolder = false;
+		newFolderName = '';
+		creatingFile = false;
+		newFileName = '';
+		navHistory = [];
+		navIndex = -1;
+		if (scope.userId) void loadDir(currentPath);
 	};
 
 	onMount(() => {
-		ensureWorker();
-		loadDir(currentPath);
+		window.addEventListener('pyodide:scope', onScopeChanged);
 		window.addEventListener('pyodide:files', onFilesChanged);
+		onScopeChanged();
 	});
-
 	onDestroy(() => {
+		disposed = true;
+		++scopeGeneration;
+		++viewGeneration;
+		for (const cancel of [...pendingRequests]) cancel();
+		clearPreview();
+		window.removeEventListener('pyodide:scope', onScopeChanged);
 		window.removeEventListener('pyodide:files', onFilesChanged);
 	});
 </script>
@@ -399,17 +446,7 @@
 		onGoBack={goBack}
 		onGoForward={goForward}
 		onNavigate={(path) => loadDir(path)}
-		onRefresh={async () => {
-			try {
-				await sendWorkerMessage({ type: 'fs:sync' });
-			} catch {}
-			if (selectedFile) {
-				const name = selectedFile.split('/').pop() ?? '';
-				openEntry({ name, type: 'file', size: 0 });
-			} else {
-				loadDir(currentPath);
-			}
-		}}
+		onRefresh={() => refreshView(true)}
 		onNewFolder={startNewFolder}
 		onNewFile={startNewFile}
 		onUploadFiles={uploadFiles}

@@ -2,7 +2,12 @@
 	import CommentsHost from '$lib/components/comments/CommentsHost.svelte';
 	import { io } from 'socket.io-client';
 	import { spring } from 'svelte/motion';
-	import { createPyodideWorker } from '$lib/pyodide/createPyodideWorker';
+	import {
+		activatePyodideScope,
+		clearPyodideRuntime,
+		createPyodideWorker,
+		getPyodideScope
+	} from '$lib/pyodide/createPyodideWorker';
 	import { Toaster, toast } from 'svelte-sonner';
 
 	let loadingProgress = spring(0, {
@@ -38,7 +43,6 @@
 		showTabs,
 		showFileNavPath,
 		showFileNavDir,
-		pyodideWorker,
 		desktopEvent
 	} from '$lib/stores';
 	import { refreshChatList } from '$lib/stores/chatList';
@@ -293,25 +297,15 @@
 		});
 	};
 
-	/**
-	 * Get or create the persistent Pyodide worker.
-	 * The worker persists across executions so the virtual FS (IDBFS) is preserved.
-	 */
-	const getOrCreateWorker = () => {
-		let worker = $pyodideWorker;
-		if (!worker) {
-			worker = createPyodideWorker();
-			pyodideWorker.set(worker);
-		}
-		return worker;
-	};
+	let pyodideUserId;
+	$: if (typeof window !== 'undefined') {
+		$chatId;
+		if (pyodideUserId !== $user?.id) clearPyodideRuntime();
+		pyodideUserId = $user?.id;
+		activatePyodideScope();
+	}
 
-	const executePythonAsWorker = async (id, code, cb, files = []) => {
-		let result = null;
-		let stdout = null;
-		let stderr = null;
-
-		let executing = true;
+	const executePythonAsWorker = async (id, code, cb, files = [], scope = getPyodideScope()) => {
 		let packages = [
 			/\bimport\s+requests\b|\bfrom\s+requests\b/.test(code) ? 'requests' : null,
 			/\bimport\s+bs4\b|\bfrom\s+bs4\b/.test(code) ? 'beautifulsoup4' : null,
@@ -332,7 +326,7 @@
 			/\bimport\s+docx\b|\bfrom\s+docx\b/.test(code) ? 'python-docx' : null
 		].filter(Boolean);
 
-		const worker = getOrCreateWorker();
+		const worker = createPyodideWorker(scope, { background: true });
 
 		// Fetch file content from the server and prepare for the worker
 		let filePayloads = [];
@@ -353,101 +347,32 @@
 			}
 		}
 
-		worker.postMessage({
-			type: 'execute',
-			id: id,
-			code: code,
-			packages: packages,
-			files: filePayloads.length > 0 ? filePayloads : undefined
-		});
-
-		// Timeout for this specific execution (not the worker itself)
-		let timeoutId = setTimeout(() => {
-			if (executing) {
-				executing = false;
-				stderr = 'Execution Time Limit Exceeded';
-
-				// Terminate and recreate the worker on timeout
-				worker.terminate();
-				pyodideWorker.set(null);
-
-				if (cb) {
-					cb(
-						JSON.parse(
-							JSON.stringify(
-								{
-									stdout: stdout,
-									stderr: stderr,
-									result: result
-								},
-								(_key, value) => (typeof value === 'bigint' ? value.toString() : value)
-							)
-						)
-					);
+		await new Promise((resolve) => {
+			const onMessage = (event) => {
+				if (event.data?.id !== id) return;
+				worker.removeEventListener('message', onMessage);
+				const { stdout = null, stderr = null, result = null } = event.data;
+				try {
+					cb?.(JSON.parse(JSON.stringify({ stdout, stderr, result },
+						(_key, value) => typeof value === 'bigint' ? value.toString() : value)));
+				} finally {
+					const currentScope = getPyodideScope();
+					if (!event.data.error && currentScope.key === scope.key && currentScope.generation === scope.generation) {
+						window.dispatchEvent(new Event('pyodide:files'));
+					}
+					worker.terminate();
+					resolve();
 				}
-			}
-		}, 60000);
-
-		// Use addEventListener so multiple concurrent executions don't clobber each other
-		const onMessage = (event) => {
-			const { id: eventId, ...data } = event.data;
-			// Only handle responses for this execution ID
-			if (eventId !== id) return;
-			// Ignore FS responses (they use a type field)
-			if (data.type && data.type.startsWith('fs:')) return;
-
-			console.log('pyodideWorker.onmessage', event);
-			clearTimeout(timeoutId);
-			worker.removeEventListener('message', onMessage);
-			worker.removeEventListener('error', onError);
-
-			data['stdout'] && (stdout = data['stdout']);
-			data['stderr'] && (stderr = data['stderr']);
-			data['result'] && (result = data['result']);
-
-			if (cb) {
-				cb(
-					JSON.parse(
-						JSON.stringify(
-							{
-								stdout: stdout,
-								stderr: stderr,
-								result: result
-							},
-							(_key, value) => (typeof value === 'bigint' ? value.toString() : value)
-						)
-					)
-				);
-			}
-
-			executing = false;
-		};
-
-		const onError = (event) => {
-			console.log('pyodideWorker.onerror', event);
-			clearTimeout(timeoutId);
-			worker.removeEventListener('message', onMessage);
-			worker.removeEventListener('error', onError);
-
-			if (cb) {
-				cb(
-					JSON.parse(
-						JSON.stringify(
-							{
-								stdout: stdout,
-								stderr: stderr,
-								result: result
-							},
-							(_key, value) => (typeof value === 'bigint' ? value.toString() : value)
-						)
-					)
-				);
-			}
-			executing = false;
-		};
-
-		worker.addEventListener('message', onMessage);
-		worker.addEventListener('error', onError);
+			};
+			worker.addEventListener('message', onMessage);
+			worker.postMessage({
+				type: 'execute',
+				id,
+				code,
+				packages,
+				files: filePayloads.length > 0 ? filePayloads : undefined
+			});
+		});
 	};
 
 	const resolveToolServer = (serverUrl) => {
@@ -580,6 +505,9 @@
 
 	const chatEventHandler = async (event, cb) => {
 		if (event.shared) return;
+		const pythonScope = event?.data?.type === 'execute:python'
+			? getPyodideScope(event?.data?.data?.chat_id || event.chat_id)
+			: null;
 		const chat = $page.url.pathname.includes(`/c/${event.chat_id}`);
 
 		// Skip events from temporary chats that are not the current chat.
@@ -645,7 +573,7 @@
 		if (data?.session_id === $socket.id) {
 			if (type === 'execute:python') {
 				console.log('execute:python', data);
-				executePythonAsWorker(data.id, data.code, cb, data.files || []);
+				executePythonAsWorker(data.id, data.code, cb, data.files || [], pythonScope);
 				return;
 			} else if (type === 'execute:tool') {
 				console.log('execute:tool', data);
@@ -1460,6 +1388,7 @@
 	}
 
 	onDestroy(() => {
+		clearPyodideRuntime();
 		bc.close();
 	});
 </script>

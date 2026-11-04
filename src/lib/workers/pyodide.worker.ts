@@ -16,6 +16,7 @@ declare global {
 // Pyodide bootstrap
 
 let pyodideReady: Promise<void> | null = null;
+let runtimeScope: string | null = null;
 
 async function loadPyodideAndPackages(packages: string[] = []) {
 	self.stdout = null;
@@ -44,28 +45,16 @@ async function loadPyodideAndPackages(packages: string[] = []) {
 		packages: ['micropip']
 	});
 
-	// Give uploads an IDBFS home; RAM is a short-term rental.
-	const uploadDir = '/mnt/uploads';
-	self.pyodide.FS.mkdirTree(uploadDir);
-	self.pyodide.FS.mount(self.pyodide.FS.filesystems.IDBFS, {}, '/mnt');
-
-	// Unpack the files IndexedDB kept between visits.
-	await new Promise<void>((resolve) => {
-		(self.pyodide.FS as any).syncfs(true, (err: Error | null) => {
-			if (err) {
-				console.error('Error syncing from IndexedDB:', err);
-			}
-			// Continue startup even if restoring persisted files failed; the error is logged above.
-			resolve();
-		});
+	if (!runtimeScope) throw new Error('Missing Python context');
+	const mountPath = `/.chat-workspaces/${runtimeScope}`;
+	self.pyodide.FS.mkdirTree(mountPath);
+	self.pyodide.FS.mount(self.pyodide.FS.filesystems.IDBFS, {}, mountPath);
+	if (self.pyodide.FS.analyzePath('/mnt').exists) self.pyodide.FS.rmdir('/mnt');
+	self.pyodide.FS.symlink(mountPath, '/mnt');
+	await new Promise<void>((resolve, reject) => {
+		(self.pyodide.FS as any).syncfs(true, (err: Error | null) => err ? reject(err) : resolve());
 	});
-
-	// First visit? Make sure /mnt/uploads has actually moved in.
-	try {
-		self.pyodide.FS.stat(uploadDir);
-	} catch {
-		self.pyodide.FS.mkdirTree(uploadDir);
-	}
+	self.pyodide.FS.mkdirTree('/mnt/uploads');
 
 	const micropip = self.pyodide.pyimport('micropip');
 	await micropip.install(packages);
@@ -88,17 +77,9 @@ async function ensurePyodide(packages: string[] = []) {
 	}
 }
 
-/**
- * Persist the in-memory FS to IndexedDB (fire-and-forget with logging).
- */
-function persistFS() {
-	if (!self.pyodide) return;
-	(self.pyodide.FS as any).syncfs(false, (err: Error | null) => {
-		if (err) {
-			console.error('Error syncing to IndexedDB:', err);
-		} else {
-			console.log('Successfully synced to IndexedDB.');
-		}
+function persistFS(): Promise<void> {
+	return new Promise((resolve, reject) => {
+		(self.pyodide.FS as any).syncfs(false, (err: Error | null) => err ? reject(err) : resolve());
 	});
 }
 
@@ -180,7 +161,6 @@ async function executeCode(
 	// Upload any accompanying files before execution
 	if (files && files.length > 0) {
 		fsUploadFiles(files);
-		persistFS();
 	}
 
 	try {
@@ -220,45 +200,34 @@ matplotlib.pyplot.show = show`);
 
 		console.log('Python result:', self.result);
 
-		// Persist any files the code may have written
-		persistFS();
 	} catch (error: unknown) {
 		self.stderr = error instanceof Error ? error.message : String(error);
 	}
+	await persistFS();
 
 	self.postMessage({ id, result: self.result, stdout: self.stdout, stderr: self.stderr });
 }
 
 // Message handler
 
-self.onmessage = async (event) => {
-	const data = event.data;
-	const { id, type } = data;
-
-	// Backward compatibility: messages without a `type` field are execute requests
+async function handleMessage(data: any) {
+	const { id, type, scope } = data;
+	if (!scope || (runtimeScope && runtimeScope !== scope)) {
+		throw new Error('Python context mismatch');
+	}
+	runtimeScope = scope;
 	if (!type || type === 'execute') {
-		const { code, files, ...context } = data;
-
-		// Copy context keys (packages, etc.) into worker scope
-		for (const key of Object.keys(context)) {
-			if (key !== 'id' && key !== 'type') {
-				self[key] = context[key];
-			}
-		}
-
-		await ensurePyodide(self.packages);
-		await executeCode(id, code, files);
+		await ensurePyodide(data.packages || []);
+		await executeCode(id, data.code, data.files);
 		return;
 	}
-
-	// FS operations require Pyodide to be loaded
 	await ensurePyodide();
 
 	switch (type) {
 		case 'fs:upload': {
 			const { files, dir } = data;
 			fsUploadFiles(files, dir);
-			persistFS();
+			await persistFS();
 			self.postMessage({ id, type: 'fs:upload', success: true });
 			break;
 		}
@@ -285,31 +254,37 @@ self.onmessage = async (event) => {
 
 		case 'fs:delete': {
 			fsDelete(data.path);
-			persistFS();
+			await persistFS();
 			self.postMessage({ id, type: 'fs:delete', success: true });
 			break;
 		}
 
 		case 'fs:mkdir': {
 			fsMkdir(data.path);
-			persistFS();
+			await persistFS();
 			self.postMessage({ id, type: 'fs:mkdir', success: true });
 			break;
 		}
 
 		case 'fs:sync': {
-			// Re-read from IndexedDB into memory to pick up externally written files
-			(self.pyodide.FS as any).syncfs(true, (err: Error | null) => {
-				if (err) {
-					console.error('Error syncing from IndexedDB:', err);
-				}
-				self.postMessage({ id, type: 'fs:sync', success: !err });
+			await new Promise<void>((resolve, reject) => {
+				(self.pyodide.FS as any).syncfs(true, (err: Error | null) => err ? reject(err) : resolve());
 			});
+			self.postMessage({ id, type: 'fs:sync', success: true });
 			break;
 		}
 
 		default:
 			console.warn('Unknown message type:', type);
+	}
+}
+
+self.onmessage = async (event) => {
+	try {
+		await handleMessage(event.data);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		self.postMessage({ id: event.data?.id, type: event.data?.type, error: message, stderr: message, success: false });
 	}
 };
 

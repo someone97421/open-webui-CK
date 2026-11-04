@@ -20,6 +20,7 @@
 	} from '$lib/stores';
 	import { refreshChatList, refreshFolderChatLists } from '$lib/stores/chatList';
 	import { sanitizeResponseContent, extractCurlyBraceWords } from '$lib/utils';
+	import { isArchivedProject } from '$lib/utils/projects';
 	import {
 		resolveLocalizedModelDescription,
 		resolveLocalizedModelName,
@@ -116,11 +117,11 @@
 			(key) => $i18n.t(key)
 		);
 
-	// True when viewing a shared folder the current user doesn't own AND lacks write access
+	// Shared folders without write access and archived projects are read-only.
 	$: folderReadOnly =
 		$selectedFolder != null &&
-		$selectedFolder.user_id !== $user?.id &&
-		!$selectedFolder.write_access;
+		(($selectedFolder.user_id !== $user?.id && !$selectedFolder.write_access) ||
+			isArchivedProject($selectedFolder));
 </script>
 
 <div class="m-auto w-full max-w-[58rem] px-1 md:@2xl:px-20 translate-y-6 py-24 text-center">
@@ -310,7 +311,7 @@
 
 	{#if $selectedFolder}
 		<div class="mx-auto px-4 md:max-w-3xl md:px-6 min-h-62" in:fade={{ duration: 200, delay: 200 }}>
-			<FolderPlaceholder folder={$selectedFolder} />
+			<FolderPlaceholder folder={$selectedFolder} readOnly={folderReadOnly} />
 		</div>
 	{:else}
 		<div class="mx-auto max-w-2xl mt-2" in:fade={{ duration: 200, delay: 200 }}>

@@ -17,6 +17,10 @@
 	import { chats, folders, settings, theme, user, visibleControls } from '$lib/stores';
 	import { createMessagesList } from '$lib/utils';
 	import { getOutputText } from '$lib/components/chat/Messages/structuredOutput';
+	import {
+		isArchivedProject,
+		isCrossProjectChatMove
+	} from '$lib/utils/projects';
 	import ArchiveBoxIcon from '$lib/components/icons/ArchiveBox.svelte';
 	import CopyIcon from './icons/Copy.svelte';
 	import DownloadIcon from './icons/Download.svelte';
@@ -45,6 +49,7 @@
 	export let chatId = '';
 	export let archived = false;
 	export let readonly = false;
+	export let currentFolderId: string | null = null;
 
 	let show = false;
 	let pinned = false;
@@ -306,8 +311,23 @@
 		}
 	};
 
+	const loadCurrentChat = async () => {
+		if (chat?.id === chatId) return;
+		chat = await getChatById(localStorage.token, chatId).catch(() => null);
+	};
+
+	$: effectiveFolderId = currentFolderId ?? chat?.folder_id ?? null;
+	$: sourceFolder = $folders.find((folder) => folder.id === effectiveFolderId) ?? null;
+	$: moveFolders = $folders.filter(
+		(folder) =>
+			folder.id !== effectiveFolderId &&
+			!isArchivedProject(folder) &&
+			!isCrossProjectChatMove(sourceFolder, folder)
+	);
+
 	$: if (show && !readonly) {
 		checkPinned();
+		if (!currentFolderId) void loadCurrentChat();
 	}
 </script>
 
@@ -468,7 +488,7 @@
 					</button>
 				{/if}
 
-				{#if chatId && $folders.length > 0}
+				{#if chatId && moveFolders.length > 0}
 					<DropdownSub contentClass="select-none z-50 max-h-52 overflow-y-auto scrollbar-hidden">
 						<button
 							role="menuitem"
@@ -480,7 +500,7 @@
 							<div class="flex items-center">{$i18n.t('Move')}</div>
 						</button>
 
-						{#each $folders.sort((a, b) => b.updated_at - a.updated_at) as folder}
+					{#each [...moveFolders].sort((a, b) => b.updated_at - a.updated_at) as folder}
 							<button
 								role="menuitem"
 								draggable="false"

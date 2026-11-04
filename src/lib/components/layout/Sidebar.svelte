@@ -25,6 +25,8 @@
 		visiblePinnedModels,
 		visibleControls,
 		selectedFolder,
+		selectedTerminalId,
+		terminalServers,
 		WEBUI_NAME,
 		sidebarWidth
 	} from '$lib/stores';
@@ -69,6 +71,12 @@
 	import { updateUserSettings } from '$lib/apis/users';
 	import { createNoteHandler } from '$lib/components/notes/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
+	import {
+		getAccessibleProjectTerminals,
+		isArchivedProject,
+		isProjectFolder,
+		PROJECT_IMPORT_ERROR
+	} from '$lib/utils/projects';
 
 	import InboxButton from './InboxButton.svelte';
 	import InboxHost from './InboxHost.svelte';
@@ -240,6 +248,7 @@
 	$: allChatsLoaded = $chats !== null && allLoaded;
 
 	let showCreateFolderModal = false;
+	let showCreateProjectModal = false;
 
 	let showPinnedModels = true;
 	let showPinnedNotes = false;
@@ -250,10 +259,12 @@
 		$channels.filter((channel) => channel.type === 'dm')
 	].filter((group) => group.length > 0);
 	let showFolders = false;
+	let showProjects = true;
+	let showArchivedProjects = false;
 	let showSharedFolders = false;
 	let showChatsMenu = false;
 
-	let folders = {};
+	let folders: Record<string, any> = {};
 	type SelectedSidebarFolder = { id: string } | null;
 	let folderRegistry: Record<
 		string,
@@ -269,6 +280,16 @@
 	let newFolderId = null;
 
 	let sharedFolders: any[] = [];
+	$: projectTerminalOptions = getAccessibleProjectTerminals($terminalServers ?? []);
+	$: activeProjectFolders = Object.fromEntries(
+		Object.entries(folders).filter(([, folder]) => isProjectFolder(folder) && !isArchivedProject(folder))
+	);
+	$: archivedProjectFolders = Object.fromEntries(
+		Object.entries(folders).filter(([, folder]) => isProjectFolder(folder) && isArchivedProject(folder))
+	);
+	$: legacyFolders = Object.fromEntries(
+		Object.entries(folders).filter(([, folder]) => !isProjectFolder(folder))
+	);
 
 	const initSelectedFolderChats = (folder: SelectedSidebarFolder) => {
 		if (!folder?.id) {
@@ -439,7 +460,7 @@
 		name = name?.trim();
 		if (!name) {
 			toast.error($i18n.t('Folder name cannot be empty.'));
-			return;
+			return null;
 		}
 
 		// Check sibling names before adding another folder called "New folder".
@@ -479,11 +500,19 @@
 			return null;
 		});
 
-		if (res) {
-			// newFolderId = res.id;
-			await initFolders();
+		if (!res) {
+			folders = Object.fromEntries(Object.entries(folders).filter(([id]) => id !== tempId));
+			return null;
+		}
+		await initFolders();
+		if (isProjectFolder(res)) {
+			showProjects = true;
+			selectedFolder.set(res);
+			await goto(`/folders/${res.id}`);
+		} else {
 			showFolders = true;
 		}
+		return res;
 	};
 
 	const initChannels = async () => {
@@ -604,11 +633,14 @@
 	};
 
 	const importChatHandler = async (items, pinned = false, folderId = null) => {
+		if (folderId && isProjectFolder(folders[folderId])) {
+			toast.error(PROJECT_IMPORT_ERROR);
+			return;
+		}
 		if (!canImportChats) {
 			toast.error($i18n.t('Access prohibited'));
 			return;
 		}
-
 		console.log('importChatHandler', items, pinned, folderId);
 		for (const item of items) {
 			console.log(item);
@@ -962,6 +994,7 @@
 	const newChatHandler = async () => {
 		selectedChatId = null;
 		selectedFolder.set(null);
+		selectedTerminalId.set(null);
 		closeMobileSidebar();
 
 		if ($user?.role !== 'admin' && $user?.permissions?.chat?.temporary_enforced) {
@@ -1033,9 +1066,16 @@
 <FolderModal
 	bind:show={showCreateFolderModal}
 	onSubmit={async (folder) => {
-		await createFolder(folder);
-		showCreateFolderModal = false;
+		const res = await createFolder(folder);
+		if (res) showCreateFolderModal = false;
+		return res;
 	}}
+/>
+
+<FolderModal
+	bind:show={showCreateProjectModal}
+	project={true}
+	onSubmit={async (folder) => await createFolder(folder)}
 />
 
 <svelte:window
@@ -1419,6 +1459,26 @@
 							</a>
 						</div>
 
+					{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
+						<div class="px-1 flex justify-center text-gray-700 dark:text-gray-300">
+							<Tooltip content={projectTerminalOptions.length > 0 ? '新建项目' : '暂无可用项目 Terminal'} className="w-full">
+								<button
+									type="button"
+									id="sidebar-new-project-button"
+									class="group flex w-full items-center space-x-2 rounded-xl px-2 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-900 transition outline-none disabled:cursor-not-allowed disabled:opacity-40"
+									disabled={projectTerminalOptions.length === 0}
+									on:click={() => (showCreateProjectModal = true)}
+									aria-label="新建项目"
+								>
+									<div class="self-center flex size-4 shrink-0 items-center justify-center">
+										<WorkspaceIcon className="size-4" strokeWidth="1.5" />
+									</div>
+									<div class="flex flex-1 self-center text-left text-[0.8125rem] leading-5">新建项目</div>
+								</button>
+							</Tooltip>
+						</div>
+					{/if}
+
 						<div class="px-1 flex justify-center text-gray-700 dark:text-gray-300">
 							<button
 								id="sidebar-search-button"
@@ -1550,6 +1610,50 @@
 					{/if}
 
 					{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
+					<SidebarSection
+						id="sidebar-projects"
+						bind:open={showProjects}
+						name="项目"
+						onAdd={projectTerminalOptions.length > 0 ? () => (showCreateProjectModal = true) : null}
+						onAddLabel="新建项目"
+					>
+						<Folders
+							bind:folderRegistry
+							folders={activeProjectFolders}
+							{shiftKey}
+							onFolderUnreadCounts={applyFolderUnreadCounts}
+							onDelete={(folderId) => {
+								if ($selectedFolder?.id === folderId) selectedFolder.set(null);
+								initChatList();
+							}}
+							on:update={() => initChatList()}
+							on:import={(e) => importChatHandler(e.detail.items, false, e.detail.folderId)}
+							on:change={() => initChatList()}
+						/>
+						{#if Object.keys(archivedProjectFolders).length > 0}
+							<SidebarSection
+								id="sidebar-archived-projects"
+								bind:open={showArchivedProjects}
+								name={`已归档项目 (${Object.keys(archivedProjectFolders).length})`}
+								dragAndDrop={false}
+							>
+								<Folders
+									bind:folderRegistry
+									folders={archivedProjectFolders}
+									{shiftKey}
+									onFolderUnreadCounts={applyFolderUnreadCounts}
+									onDelete={(folderId) => {
+										if ($selectedFolder?.id === folderId) selectedFolder.set(null);
+										initChatList();
+									}}
+									on:update={() => initChatList()}
+									on:import={(e) => importChatHandler(e.detail.items, false, e.detail.folderId)}
+									on:change={() => initChatList()}
+								/>
+							</SidebarSection>
+						{/if}
+					</SidebarSection>
+
 						<SidebarSection
 							id="sidebar-folders"
 							bind:open={showFolders}
@@ -1581,7 +1685,7 @@
 						>
 							<Folders
 								bind:folderRegistry
-								{folders}
+							folders={legacyFolders}
 								{shiftKey}
 								onFolderUnreadCounts={applyFolderUnreadCounts}
 								onDelete={(folderId) => {
@@ -1606,7 +1710,7 @@
 
 					<SidebarSection
 						id="sidebar-chats"
-						name={$i18n.t('Chats')}
+					name="会话"
 						on:change={async (e) => {
 							selectedFolder.set(null);
 						}}
@@ -1644,6 +1748,10 @@
 										return;
 									}
 
+									if (isProjectFolder(folders[chat.folder_id])) {
+										toast.error('项目会话不能跨项目或移至普通会话。');
+										return;
+									}
 									if (chat.folder_id) {
 										const res = await updateChatFolderIdById(
 											localStorage.token,
@@ -1747,6 +1855,10 @@
 
 												if (chat) {
 													console.log(chat);
+														if (isProjectFolder(folders[chat.folder_id])) {
+															toast.error('项目会话不能跨项目或移至普通会话。');
+															return;
+														}
 													if (chat.folder_id) {
 														const res = await updateChatFolderIdById(
 															localStorage.token,

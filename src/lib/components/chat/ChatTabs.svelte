@@ -5,6 +5,7 @@
 	let gitDiffMode: 'unified' | 'split' = 'unified';
 	let gitHideWhitespace = false;
 	import { onMount, onDestroy, tick, getContext } from 'svelte';
+	import { derived, readable, type Readable } from 'svelte/store';
 	import Sortable from 'sortablejs';
 	import { beforeNavigate, goto } from '$app/navigation';
 	import {
@@ -23,7 +24,6 @@
 		showEmbeds,
 		settings,
 		showFileNavPath,
-		selectedTerminalId,
 		user,
 		visibleControls
 	} from '$lib/stores';
@@ -77,6 +77,8 @@
 
 	const i18n = getContext<any>('i18n');
 	const ensureTerminalChat = getContext<((history: any) => Promise<string | null>) | undefined>('ensureTerminalChat');
+	const chatMode = getContext<Readable<any> | undefined>('chatMode') ?? readable({ project: null, ready: false });
+	const selectedTerminalId = derived(chatMode, (mode) => mode.project?.terminal_id ?? null);
 	let disposed = false;
 
 	export let history;
@@ -217,6 +219,7 @@
 	$: terminalContext = (contextTab && fileContexts[contextTab.id]) ?? contextTab?.context ?? null;
 	// Resolve before reactive Files-tab creation, which can run later in the same update.
 	$: gitConnection =
+		$chatMode.ready && !!$chatMode.project &&
 		mounted &&
 		$config?.features?.enable_tool_servers &&
 		(contextTab?.connection ??
@@ -241,6 +244,7 @@
 	};
 	const openPanel = async (tab: PanelTab) => {
 		if (tab.terminalId) {
+			if (!terminalAccessible(tab.terminalId)) return;
 			const panelHistory = history;
 			const selector = $selectedTerminalId;
 			try {
@@ -261,10 +265,21 @@
 		tabs = openTab(tabs, tab);
 		showTabs.set(true);
 	};
-	const openFiles = (selector = $selectedTerminalId, directory?: string) => {
-		if (selector ? !terminalAccessible(selector) : !showFilesTab) return;
+	const openFiles = async (selector = $selectedTerminalId, directory?: string) => {
+		if (!$chatMode.ready || (selector ? !terminalAccessible(selector) : !showFilesTab)) return;
+		const panelHistory = history;
+		if (!selector) {
+			try {
+				const id = ensureTerminalChat ? await ensureTerminalChat(panelHistory) : chatId;
+				await tick();
+				if (disposed || history !== panelHistory || selector !== $selectedTerminalId || !id || id !== chatId) return;
+			} catch (error) {
+				if (!disposed && history === panelHistory) toast.error(`${error}`);
+				return;
+			}
+		}
 		const id = selector ? `files:${selector}` : 'files';
-		openPanel({
+		await openPanel({
 			id,
 			kind: 'files',
 			label: $i18n.t('Files'),
@@ -476,7 +491,7 @@
 
 	$: hasMessages = history?.messages && Object.keys(history.messages).length > 0;
 
-	const chatContext = (terminal: any) => terminal?.contexts?.chat ?? {};
+	const chatContext = (terminal: any) => terminal?.contexts?.project ?? {};
 	const chatContextAvailable = (terminal: any) => chatContext(terminal) !== false;
 	const chatContextNeedsSavedChat = (terminal: any) =>
 		chatContext(terminal)?.context_id === 'chat_id' && terminal?.features?.workspace_isolation !== true;
@@ -488,6 +503,7 @@
 		chatContextAvailable(selectedSystemTerminal) &&
 		!(chatContextNeedsSavedChat(selectedSystemTerminal) && !isSavedChatId(chatId));
 	$: terminalFilesAvailable = !!(
+		$chatMode.ready && !!$chatMode.project &&
 		$config?.features?.enable_tool_servers &&
 		$selectedTerminalId &&
 		(selectedSystemTerminalAvailable ||
@@ -497,7 +513,7 @@
 	);
 	$: showFilesTab =
 		terminalFilesAvailable ||
-		(codeInterpreterEnabled && $config?.code?.interpreter_engine !== 'jupyter');
+		(!$chatMode.project && codeInterpreterEnabled);
 	$: if (!hasMessages) showOverview.set(false);
 	$: showCommentsTab = !!(
 		$config?.features?.enable_comments &&
@@ -567,6 +583,7 @@
 	$: directTerminals =
 		($settings as { terminalServers?: { url: string; key?: string }[] })?.terminalServers ?? [];
 	const terminalAccessible = (selector: string) => {
+		if (!$chatMode.ready || selector !== $selectedTerminalId || !$chatMode.project) return false;
 		if (!$config?.features?.enable_tool_servers) return false;
 		const system = ($terminalServers ?? []).find((terminal) => terminal.id === selector);
 		if (system)
@@ -655,7 +672,7 @@
 		}
 		tabsChatId = chatId;
 	}
-	$: if ($showTabs === true && !tabs.tabs.length) {
+	$: if ($chatMode.ready && $showTabs === true && !tabs.tabs.length) {
 		const options = [
 			...availableViews
 				.filter((view) => view.available)
@@ -741,18 +758,6 @@
 		showOverview.set(false);
 	});
 
-	// Clear selected direct terminal if user lost permission
-	$: if (
-		$selectedTerminalId &&
-		$terminalServers !== null &&
-		!($terminalServers ?? []).some((t) => t.id && t.id === $selectedTerminalId) &&
-		!(
-			$config?.features?.enable_direct_integrations &&
-			($user?.role === 'admin' || ($user?.permissions?.features?.direct_tool_servers ?? true))
-		)
-	) {
-		selectedTerminalId.set(null);
-	}
 
 	const handleMediaQuery = (event: MediaQueryList | MediaQueryListEvent) => {
 		if (panelTarget && largeScreen !== event.matches) releasePanel(panelTarget);

@@ -22,6 +22,7 @@
 	dayjs.extend(relativeTime);
 
 	import { onDestroy, onMount, tick, getContext, createEventDispatcher } from 'svelte';
+	import { readable, type Readable } from 'svelte/store';
 
 	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
 	import { pickAndDownloadFile } from '$lib/utils/onedrive-file-picker';
@@ -135,6 +136,8 @@
 
 	const i18n: any = getContext('i18n');
 	const ensureTerminalChat = getContext<((history: any) => Promise<string | null>) | undefined>('ensureTerminalChat');
+	const ensureChat = getContext<((history: any) => Promise<string | null>) | undefined>('ensureChat');
+	const chatMode = getContext<Readable<any> | undefined>('chatMode') ?? readable(null);
 	let uploadDisposed = false;
 	onDestroy(() => { uploadDisposed = true; });
 
@@ -239,6 +242,7 @@
 			)
 		: false;
 	$: canToggleTemporary =
+		!$chatMode?.project &&
 		!embedded &&
 		!chatId &&
 		($_user?.role === 'admin' ||
@@ -890,6 +894,7 @@
 		$config?.features?.enable_direct_integrations &&
 		($_user?.role === 'admin' || ($_user?.permissions?.features?.direct_tool_servers ?? true));
 	$: showTerminalSelector =
+		!$chatMode &&
 		terminalSelectionEnabled &&
 		$config?.features?.enable_tool_servers &&
 		terminalCapableModels.length > 0 &&
@@ -932,6 +937,7 @@
 
 	let showCodeInterpreterButton = false;
 	$: showCodeInterpreterButton =
+		!$chatMode?.project &&
 		!$selectedTerminalId &&
 		selectedModelIds.length === codeInterpreterCapableModels.length &&
 		$config?.features?.enable_code_interpreter &&
@@ -958,12 +964,13 @@
 	}
 
 	// Disable code interpreter when terminal is active (mutually exclusive)
-	$: if ($selectedTerminalId && codeInterpreterEnabled) {
+	$: if (($chatMode?.project || (!$chatMode && $selectedTerminalId)) && codeInterpreterEnabled) {
 		codeInterpreterEnabled = false;
 	}
 
 	// Clear selected terminal when model doesn't support terminal
 	$: if (
+		!$chatMode &&
 		terminalSelectionEnabled &&
 		inputId === 'chat-input' &&
 		$selectedTerminalId &&
@@ -1024,6 +1031,7 @@
 		servers: any[] | null = $terminalServers,
 		settingsValue: any = $settings
 	) => {
+		if ($chatMode && (!$chatMode.ready || selectedId !== $chatMode.project?.terminal_id)) return null;
 		if (!selectedId) return null;
 
 		const systemTerminal = (servers ?? []).find(
@@ -1040,8 +1048,9 @@
 
 	const uploadTerminalFile = async (fileItem, sessionId: string | null) => {
 		const uploadHistory = history;
+		const uploadUserId = $_user?.id;
 		const selector = $selectedTerminalId;
-		const current = () => !uploadDisposed && history === uploadHistory &&
+		const current = () => !uploadDisposed && history === uploadHistory && $_user?.id === uploadUserId &&
 			$selectedTerminalId === selector && files.includes(fileItem) && chatId === sessionId;
 		fileItem.status = 'uploading';
 		fileItem.error = '';
@@ -1119,6 +1128,11 @@
 		return upload.finally(() => terminalUploads.delete(upload));
 	};
 	const performUpload = async (file, process = true, itemData = {}) => {
+		const uploadHistory = history;
+		const uploadUserId = $_user?.id;
+		const uploadProjectId = $chatMode?.project?.terminal_id ?? null;
+		let uploadChatId = chatId;
+		if ($chatMode && !$chatMode.ready) return null;
 		if ($_user?.role !== 'admin' && !($_user?.permissions?.chat?.file_upload ?? true)) {
 			toast.error($i18n.t('You do not have permission to upload files.'));
 			return null;
@@ -1155,6 +1169,24 @@
 		}
 
 		files = [...files, fileItem];
+		if ($chatMode && !uploadProjectId && !isTemporary) {
+			try {
+				const id = ensureChat ? await ensureChat(uploadHistory) : chatId;
+				await tick();
+				if (uploadDisposed || history !== uploadHistory || $_user?.id !== uploadUserId || !files.includes(fileItem)) return null;
+				if (!isSavedChatId(id) || id !== chatId) throw new Error('上传前无法准备持久化会话。');
+				uploadChatId = id;
+			} catch (error) {
+				if (!uploadDisposed && history === uploadHistory && $_user?.id === uploadUserId) {
+					files = files.filter((item) => item !== fileItem);
+					toast.error(`${error}`);
+				}
+				return null;
+			}
+		}
+		const currentUpload = () => !uploadDisposed && history === uploadHistory &&
+			$_user?.id === uploadUserId && chatId === uploadChatId && files.includes(fileItem) &&
+			($chatMode?.project?.terminal_id ?? null) === uploadProjectId;
 
 		if (filesystemUploadTerminal) {
 			fileItem.type = 'filesystem';
@@ -1201,6 +1233,7 @@
 
 				// During the file upload, file content is automatically extracted.
 				const uploadedFile = await uploadFile(localStorage.token, file, metadata, process);
+				if (!currentUpload()) return null;
 
 				if (uploadedFile) {
 					console.log('File upload completed:', {
@@ -1229,12 +1262,13 @@
 					files = files.filter((item) => item?.itemId !== tempItemId);
 				}
 			} catch (e) {
+				if (!currentUpload()) return null;
 				fileItem.status = 'error';
 				fileItem.error = `${e}`;
 				toast.error(`${e}`);
 				files = files.filter((item) => item?.itemId !== tempItemId);
 			} finally {
-				onUpdate({ file: fileItem });
+				if (currentUpload()) onUpdate({ file: fileItem });
 			}
 		} else {
 			// If temporary chat is enabled, we just add the file to the list without uploading it.
@@ -1245,6 +1279,7 @@
 				);
 				return null;
 			});
+			if (!currentUpload()) return null;
 
 			if (content === null) {
 				fileItem.status = 'error';
@@ -1272,6 +1307,12 @@
 	};
 
 	const inputFilesHandler = async (inputFiles) => {
+		const inputHistory = history;
+		const inputUserId = $_user?.id;
+		const inputChatId = chatId;
+		const inputProjectId = $chatMode?.project?.terminal_id ?? null;
+		const currentInput = () => !uploadDisposed && history === inputHistory && $_user?.id === inputUserId &&
+			(!inputChatId || chatId === inputChatId) && ($chatMode?.project?.terminal_id ?? null) === inputProjectId;
 		console.log('Input files handler called with:', inputFiles);
 
 		if (
@@ -1311,6 +1352,7 @@
 			}
 
 			file = await normalizeImageFile(file);
+			if (!currentInput()) return;
 			if (isRasterImageContentType(file['type']) || isHeicImage(file)) {
 				if (visionCapableModels.length === 0) {
 					toast.error($i18n.t('Selected model(s) do not support image inputs'));
@@ -1354,13 +1396,16 @@
 				};
 
 				const imageFile = isHeicImage(file) ? await convertHeicToJpeg(file) : file;
+				if (!currentInput()) return;
 				let reader = new FileReader();
 
 				reader.onload = async (event) => {
+					if (!currentInput()) return;
 					let imageUrl = event.target.result;
 
 					// Compress the image if settings or config require it
 					imageUrl = await compressImageHandler(imageUrl, $settings, $config);
+					if (!currentInput()) return;
 
 					if (isTemporary) {
 						files = [
@@ -1372,6 +1417,7 @@
 						];
 					} else {
 						const blob = await (await fetch(imageUrl)).blob();
+						if (!currentInput()) return;
 						const compressedFile = new File([blob], imageFile.name, { type: imageFile.type });
 
 						uploadFileHandler(compressedFile, false);

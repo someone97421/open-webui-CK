@@ -83,6 +83,8 @@
 	import { createTemporaryChatId, isTemporaryChatId } from '$lib/utils/chatId';
 	import { registerTemporaryChat } from '$lib/apis/terminal';
 	import { resumeTemporaryChat } from '$lib/apis';
+	import { getFolderById } from '$lib/apis/folders';
+	import { getFolderProject } from '$lib/utils/projects';
 	import {
 		applyResponseStreamEvent,
 		getOutputText,
@@ -363,6 +365,36 @@
 	let imageGenerationEnabled = false;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
+	let chatFolder: any = null;
+	let chatFolderChatId = '';
+	let folderModeError = false;
+	const readProject = (folder: any) =>
+		getFolderProject(folder) ?? getFolderProject({ project: folder?.project });
+	const chatMode = writable({ project: null as ReturnType<typeof getFolderProject>, ready: false });
+	setContext('chatMode', chatMode);
+	$: activeFolder = $chatId
+		? chatFolderChatId === $chatId ? chatFolder : null
+		: $selectedFolder;
+	$: project = readProject(activeFolder);
+	$: modeTerminalId = project?.terminal_id ?? null;
+	$: chatMode.set({ project, ready: !loading && !folderModeError });
+	$: if ($selectedTerminalId !== modeTerminalId) selectedTerminalId.set(modeTerminalId);
+	$: if (project) {
+		if (codeInterpreterEnabled) codeInterpreterEnabled = false;
+		if ($temporaryChatEnabled) temporaryChatEnabled.set(false);
+	}
+	let interpreterModeKey = '';
+	$: {
+		const allowed = !!$config?.features?.enable_code_interpreter &&
+			($user?.role === 'admin' || !!$user?.permissions?.features?.code_interpreter) &&
+			selectedModelIds.length > 0 && selectedModelIds.every((id) =>
+				$models.find((model) => model.id === id)?.info?.meta?.capabilities?.code_interpreter ?? true);
+		const key = `${$chatId}:${modeTerminalId}:${selectedModelIds.join(',')}:${allowed}`;
+		if (interpreterModeKey !== key) {
+			interpreterModeKey = key;
+			codeInterpreterEnabled = !project && allowed;
+		}
+	}
 	let webSearchActive = false;
 	let showWebSearchConfirm = false;
 	let pendingWebSearchPrompt: string | null = null;
@@ -1063,23 +1095,6 @@
 		}
 	};
 
-	/** Check whether a terminal ID references an available system or direct terminal. */
-	const isTerminalAvailable = (tid: string): boolean => {
-		return (
-			$config?.features?.enable_tool_servers === true &&
-			(($terminalServers ?? []).some((t) => t.id && t.id === tid) ||
-				($settings?.terminalServers ?? []).some((s) => s.url === tid))
-		);
-	};
-
-	$: if (
-		$terminalServers !== null &&
-		$selectedTerminalId &&
-		!isTerminalAvailable($selectedTerminalId)
-	) {
-		selectedTerminalId.set(null);
-	}
-
 	let lastTerminalSkillSelector: string | null = null;
 	$: if ($selectedTerminalId !== lastTerminalSkillSelector) {
 		terminalContext = null;
@@ -1121,7 +1136,6 @@
 			const defaultFeature = (feature: 'web_search' | 'image_generation' | 'code_interpreter') =>
 				featureAvailable(feature) &&
 				currentModels.every((model) => model.info?.meta?.defaultFeatureIds?.includes(feature));
-			const terminalId = currentModels[0]?.info?.meta?.terminalId;
 			const defaults: Record<string, any> = {
 				selectedToolIds: [
 					...new Set(
@@ -1148,15 +1162,8 @@
 				],
 				webSearchEnabled: !!defaultFeature('web_search'),
 				imageGenerationEnabled: !!defaultFeature('image_generation'),
-				codeInterpreterEnabled: !!defaultFeature('code_interpreter'),
-				terminalId:
-					terminalId &&
-					isTerminalAvailable(terminalId) &&
-					currentModels.every((model) => model.info?.meta?.terminalId === terminalId)
-						? terminalId
-						: preserveSelections
-							? null
-							: $selectedTerminalId
+				codeInterpreterEnabled: !project && !!featureAvailable('code_interpreter'),
+				terminalId: modeTerminalId
 			};
 
 			if (preserveSelections) {
@@ -1199,11 +1206,8 @@
 			);
 			defaults.webSearchEnabled &&= !!featureAvailable('web_search');
 			defaults.imageGenerationEnabled &&= !!featureAvailable('image_generation');
-			defaults.codeInterpreterEnabled &&= !!featureAvailable('code_interpreter');
-			if (!currentModels.some((model) => model.info?.meta?.capabilities?.terminal ?? true)) {
-				defaults.terminalId = null;
-			}
-			if (defaults.terminalId) defaults.codeInterpreterEnabled = false;
+			defaults.codeInterpreterEnabled = !project && !!featureAvailable('code_interpreter');
+			defaults.terminalId = modeTerminalId;
 			defaultsModelIds = modelIds;
 			({
 				selectedToolIds,
@@ -2656,6 +2660,9 @@
 		)
 			showTabs.set(false);
 		const signal = startChatLoad();
+		chatFolder = null;
+		chatFolderChatId = '';
+		folderModeError = false;
 		modelDefaults = null;
 		clearTimeout(saveControlsTimer);
 		await saveControls();
@@ -2958,6 +2965,16 @@
 		});
 
 		if (loadedChat) {
+			const folder = loadedChat.folder_id
+				? await getFolderById(localStorage.token, loadedChat.folder_id).catch((error) => {
+					if (!signal.aborted) toast.error(`${error}`);
+					return null;
+				})
+				: null;
+			if (signal.aborted || id !== $chatId) return;
+			chatFolder = folder;
+			chatFolderChatId = id;
+			folderModeError = !!loadedChat.folder_id && !folder;
 			const loadedTags = await getTagsById(localStorage.token, id, signal).catch(async (error) => {
 				console.warn('[note-chat] getTagsById failed; continuing without tags', {
 					chatIdProp,
@@ -3910,23 +3927,23 @@
 		}
 		return history === _history && !signal.aborted && $socket?.id === sessionId;
 	};
-	const getChatId = async (_history: typeof history, ensureTerminal = false): Promise<string | null> => {
+	const getChatId = async (_history: typeof history, ensureTerminal = false, ensurePersistent = false): Promise<string | null> => {
 		const signal = chatLoadController.signal;
-		if (history !== _history || signal.aborted) return null;
+		if (history !== _history || signal.aborted || folderModeError) return null;
 		if (chatIdRequest?.history === _history && chatIdRequest.signal === signal) {
 			const pending = chatIdRequest;
 			const id = await pending.promise;
 			if (history !== _history || signal.aborted) return null;
-			if (ensureTerminal && (!id || (isTemporaryChatId(id) &&
-				registeredTemporaryChat !== `${id}:${$socket?.id}`))) {
+			if ((ensurePersistent && !id) || (ensureTerminal && (!id || (isTemporaryChatId(id) &&
+				registeredTemporaryChat !== `${id}:${$socket?.id}`)))) {
 				if (chatIdRequest === pending) chatIdRequest = null;
-				return getChatId(_history, true);
+				return getChatId(_history, ensureTerminal, ensurePersistent);
 			}
 			return id;
 		}
 		const terminalSelected =
 			$config?.features?.enable_tool_servers && !!$selectedTerminalId;
-		const needsTerminal = ensureTerminal || terminalSelected || terminalTabs?.hasTerminals();
+		const needsTerminal = !!project && (ensureTerminal || terminalSelected || terminalTabs?.hasTerminals());
 		const request = { history: _history, signal, promise: Promise.resolve<string | null>(null) };
 		request.promise = (async () => {
 			let id = $chatId;
@@ -3944,7 +3961,7 @@
 					delete params.note_id;
 					chatFiles = mergeFiles(chatFiles, createdChat?.chat?.files ?? []);
 					await onSelectEmbeddedChat?.(id);
-				} else if ($temporaryChatEnabled || needsTerminal) {
+				} else if ($temporaryChatEnabled || needsTerminal || ensurePersistent) {
 					id = await initChatHandler(_history, needsTerminal);
 				}
 			}
@@ -3963,7 +3980,8 @@
 			if (chatIdRequest === request) chatIdRequest = null;
 		}
 	};
-	setContext('ensureTerminalChat', (_history = history) => getChatId(_history, true));
+	setContext('ensureTerminalChat', (_history = history) => getChatId(_history, !!project, true));
+	setContext('ensureChat', (_history = history) => getChatId(_history, false, true));
 
 	const submitHandler = async (
 		userPrompt: string,
@@ -3972,6 +3990,12 @@
 			bridge: bridgeRequest = null
 		}: { _raw?: boolean; bridge?: { userMessageId: string; modelId: string } | null } = {}
 	): Promise<BridgeSubmission> => {
+		if (loading || folderModeError) return { status: 'rejected' };
+		if (files.some((file: any) => file.type === 'filesystem' &&
+			(!project || file.terminal_id !== project.terminal_id))) {
+			toast.error('文件所属工作区与当前会话不一致，请重新上传。');
+			return { status: 'rejected' };
+		}
 		if (embedded && onBeforeNoteSubmit) {
 			try {
 				await onBeforeNoteSubmit();
@@ -4341,7 +4365,7 @@
 						? imageGenerationEnabled
 						: false,
 				code_interpreter:
-					$config?.features?.enable_code_interpreter &&
+					!project && $config?.features?.enable_code_interpreter &&
 					($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
 						? codeInterpreterEnabled
 						: false,
@@ -4393,7 +4417,8 @@
 		const filesystemAttachment = userMessage?.files?.find(
 			(file: any) => file.type === 'filesystem'
 		);
-		const requestTerminalId = filesystemAttachment?.terminal_id ?? $selectedTerminalId;
+		const requestTerminalId = project?.terminal_id ?? null;
+		const requestFolder = activeFolder;
 
 		const chatMessageFiles = _messages
 			.filter((message) => message.files)
@@ -4530,7 +4555,7 @@
 		const skillIds = [...selectedSkillIds];
 
 		// Only send terminal_id if the model has terminal capability enabled
-		const terminalEnabled =
+		const terminalEnabled = !!requestTerminalId &&
 			$config?.features?.enable_tool_servers && (model.info?.meta?.capabilities?.terminal ?? true);
 		const useChatVariablesFallback =
 			!_chatId || $temporaryChatEnabled || isTemporaryChatId(_chatId);
@@ -4575,7 +4600,7 @@
 								? ($terminalServers ?? [])
 										.filter(
 											(server) =>
-												!server.id && (!filesystemAttachment || server.url === requestTerminalId)
+												!server.id && server.url === requestTerminalId
 										)
 										.map((server) => ({ ...server, is_terminal: true }))
 								: [])
@@ -4594,7 +4619,7 @@
 
 				session_id: $socket?.id,
 				chat_id: _chatId || undefined,
-				folder_id: $selectedFolder?.id ?? undefined,
+				folder_id: requestFolder?.id ?? undefined,
 
 				id: responseMessageId,
 				...(messageIdsList ? { message_ids: messageIdsList } : {}),
@@ -4692,6 +4717,8 @@
 					for (const file of history.messages[userMessage.id]?.files ?? [])
 						if (file.type === 'filesystem' && file.session_id == null)
 							file.session_id = res.chat_id;
+					chatFolder = requestFolder;
+					chatFolderChatId = res.chat_id;
 					await chatId.set(res.chat_id);
 					if (!$temporaryChatEnabled && !embedded) {
 						// Carry the picks made on the new-chat page over to this chat
@@ -4950,7 +4977,9 @@
 	};
 	const createChatHandler = async (_history: typeof history, signal: AbortSignal, prepareTerminal: boolean) => {
 		let _chatId = $chatId;
-		const selectedFolderId = $selectedFolder?.id;
+		const creationFolder = activeFolder;
+		const selectedFolderId = creationFolder?.id;
+		if (readProject(creationFolder)) temporaryChatEnabled.set(false);
 
 		if (!$temporaryChatEnabled) {
 			const createdChat = await createNewChat(
@@ -4966,13 +4995,15 @@
 					tags: [],
 					timestamp: Date.now()
 				},
-				$selectedFolder?.id,
+				selectedFolderId,
 				chatVariables
 			);
 
 			if (!createdChat?.id) throw new Error($i18n.t('Failed to create chat'));
 			if (history !== _history || signal.aborted || $chatId !== _chatId) return '';
 			chat = createdChat;
+			chatFolder = creationFolder;
+			chatFolderChatId = createdChat.id;
 			_chatId = chat.id;
 			chatId.set(_chatId);
 
@@ -5804,7 +5835,7 @@
 					bind:this={terminalTabs}
 					chatUser={chatOwner}
 					modelId={selectedModelIds?.at(0) ?? null}
-					canSideChat={sideChatAllowed && selectedModels.length === 1 && !!selectedModelIds[0]}
+					canSideChat={!project && sideChatAllowed && selectedModels.length === 1 && !!selectedModelIds[0]}
 					systemPrompt={params?.system || $settings.system || ''}
 					submitPrompt={submitHandler}
 					onAskFile={askFile}

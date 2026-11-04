@@ -667,7 +667,7 @@
 		}
 	};
 	$: previewBaseUrl =
-		selectedTerminal && isPerChatTerminal && chatId
+		selectedTerminal && chatId && ($terminalServers ?? []).some((server) => server.url === selectedTerminal.url)
 			? `${selectedTerminal.url}/chats/${encodeURIComponent(chatId)}`
 			: (selectedTerminal?.url ?? '');
 

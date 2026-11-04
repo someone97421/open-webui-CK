@@ -19,7 +19,7 @@
 	import { toast } from 'svelte-sonner';
 	import dayjs, { getDayjsLocale } from '$lib/dayjs';
 	import relativeTime from 'dayjs/plugin/relativeTime';
-	import type { ChatParticipant } from '$lib/apis/folders';
+	import { getFolderById, type ChatParticipant } from '$lib/apis/folders';
 	import { goto, invalidate, invalidateAll } from '$app/navigation';
 	import { onMount, getContext, createEventDispatcher, tick } from 'svelte';
 	import { LinkPreview } from 'bits-ui';
@@ -43,8 +43,10 @@
 		showSidebar,
 		tags,
 		selectedFolder,
+		selectedTerminalId,
 		settings,
-		user
+		user,
+		folders
 	} from '$lib/stores';
 	import { refreshChatList, refreshSidebar } from '$lib/stores/chatList';
 
@@ -64,6 +66,11 @@
 	import { generateTitle } from '$lib/apis';
 	import { createMessagesList } from '$lib/utils';
 	import { getOutputText } from '$lib/components/chat/Messages/structuredOutput';
+	import {
+		isCrossProjectChatMove,
+		isProjectFolder,
+		PROJECT_CHAT_MOVE_ERROR
+	} from '$lib/utils/projects';
 
 	dayjs.extend(relativeTime);
 
@@ -100,6 +107,9 @@
 	export let readonly = false;
 	export let canMove = false;
 	export let canRename = false;
+	export let preserveSelectedFolder = false;
+	export let currentFolderId: string | null = null;
+	export let allowDrag = true;
 
 	export let ownerName: string | null = null;
 	export let ownerUserId: string | null = null;
@@ -199,7 +209,8 @@
 		}
 		dispatch('select');
 
-		if ($selectedFolder) {
+		if ($selectedFolder && !preserveSelectedFolder) {
+			if (isProjectFolder($selectedFolder)) selectedTerminalId.set(null);
 			selectedFolder.set(null);
 		}
 
@@ -346,23 +357,32 @@
 	};
 
 	const moveChatHandler = async (chatId, folderId) => {
-		if (chatId && folderId) {
-			const res = await updateChatFolderIdById(localStorage.token, chatId, folderId).catch(
-				(error) => {
-					toast.error(`${error}`);
-					return null;
-				}
-			);
-
-			if (res) {
-				await refreshChatList(localStorage.token, { refreshPinned: true });
-
-				dispatch('change');
-
-				toast.success($i18n.t('Chat moved successfully'));
-			}
-		} else {
+		if (!chatId || !folderId) {
 			toast.error($i18n.t('Failed to move chat'));
+			return;
+		}
+		const currentChat = await getChatById(localStorage.token, chatId).catch(() => null);
+		const targetFolder =
+			$folders.find((folder) => folder.id === folderId) ??
+			(await getFolderById(localStorage.token, folderId).catch(() => null));
+		const sourceFolder = currentChat?.folder_id
+			? ($folders.find((folder) => folder.id === currentChat.folder_id) ??
+				(await getFolderById(localStorage.token, currentChat.folder_id).catch(() => null)))
+			: null;
+		if (isCrossProjectChatMove(sourceFolder, targetFolder)) {
+			toast.error(PROJECT_CHAT_MOVE_ERROR);
+			return;
+		}
+		const res = await updateChatFolderIdById(localStorage.token, chatId, folderId).catch(
+			(error) => {
+				toast.error(`${error}`);
+				return null;
+			}
+		);
+		if (res) {
+			await refreshChatList(localStorage.token, { refreshPinned: true });
+			dispatch('change');
+			toast.success($i18n.t('Chat moved successfully'));
 		}
 	};
 
@@ -649,7 +669,7 @@
 	data-sidebar-chat-readonly={readonly}
 	bind:this={itemElement}
 	class=" w-full {className} relative group"
-	draggable={!confirmEdit && (!readonly || canMove) && !selecting}
+	draggable={allowDrag && !confirmEdit && (!readonly || canMove) && !selecting}
 	on:mouseenter={() => {
 		mouseOver = true;
 	}}
@@ -856,6 +876,7 @@
 							showShareChatModal = true;
 						}}
 						{moveChatHandler}
+						currentFolderId={chat?.folder_id ?? currentFolderId}
 						archiveChatHandler={() => {
 							archiveChatHandler(id);
 						}}

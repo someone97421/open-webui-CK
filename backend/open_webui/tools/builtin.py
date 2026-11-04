@@ -702,7 +702,7 @@ async def execute_code(
             )
             code = blocking_code + '\n' + code
 
-        engine = await Config.get('code_interpreter.engine', 'pyodide')
+        engine = (__metadata__ or {}).get('code_interpreter_engine') or await Config.get('code_interpreter.engine', 'pyodide')
         if engine == 'pyodide':
             # Execute via frontend pyodide using bidirectional event call
             if __event_call__ is None:
@@ -717,6 +717,7 @@ async def execute_code(
                         'id': str(uuid4()),
                         'code': code,
                         'session_id': (__metadata__.get('session_id') if __metadata__ else None),
+                        'chat_id': (__metadata__.get('chat_id') if __metadata__ else None),
                         'files': (__metadata__.get('files', []) if __metadata__ else []),
                     },
                 }

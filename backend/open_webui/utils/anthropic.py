@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import urlparse
 
 import aiohttp
 from open_webui.env import (
@@ -7,7 +8,7 @@ from open_webui.env import (
     ENABLE_FORWARD_USER_INFO_HEADERS,
 )
 from open_webui.models.users import UserModel
-from open_webui.utils.headers import include_user_info_headers
+from open_webui.utils.headers import get_headers_and_cookies, include_user_info_headers
 from open_webui.utils.json_codec import JSONCodec
 
 log = logging.getLogger(__name__)
@@ -34,10 +35,30 @@ ANTHROPIC_CONVERTED_REQUEST_PARAMS = {
 
 def is_anthropic_url(url: str) -> bool:
     """Check if the URL is an Anthropic API endpoint."""
-    return 'api.anthropic.com' in url
+    return urlparse(url or '').hostname == 'api.anthropic.com'
 
 
-async def get_anthropic_models(url: str, key: str, user: UserModel = None) -> dict:
+def uses_anthropic_messages(url: str, config: dict | None = None) -> bool:
+    api_type = (config or {}).get('api_type')
+    return api_type == 'messages' or (not api_type and is_anthropic_url(url))
+
+
+def prepare_anthropic_headers(headers: dict, url: str, key: str, config: dict | None = None) -> dict:
+    config = config or {}
+    if not uses_anthropic_messages(url, config):
+        return headers
+    headers = dict(headers)
+    custom_headers = {name.lower() for name in (config.get('headers') or {})}
+    if 'anthropic-version' not in {name.lower() for name in headers}:
+        headers['anthropic-version'] = ANTHROPIC_VERSION
+    if is_anthropic_url(url) and config.get('auth_type', 'bearer') in (None, 'bearer') and 'authorization' not in custom_headers:
+        headers = {name: value for name, value in headers.items() if name.lower() != 'authorization'}
+        if key and 'x-api-key' not in {name.lower() for name in headers}:
+            headers['x-api-key'] = key
+    return headers
+
+
+async def get_anthropic_models(url: str, key: str, user: UserModel = None, *, request=None, config=None) -> dict:
     """
     Fetch models from Anthropic's /v1/models endpoint with pagination.
     Normalizes the response to OpenAI format.
@@ -48,13 +69,14 @@ async def get_anthropic_models(url: str, key: str, user: UserModel = None) -> di
 
     try:
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            headers = {
-                'x-api-key': key,
-                'anthropic-version': ANTHROPIC_VERSION,
-            }
-
-            if ENABLE_FORWARD_USER_INFO_HEADERS and user:
-                headers = include_user_info_headers(headers, user)
+            cookies = None
+            if request is not None:
+                headers, cookies = await get_headers_and_cookies(request, url, key, config, user=user)
+                headers = prepare_anthropic_headers(headers, url, key, config)
+            else:
+                headers = {'x-api-key': key, 'anthropic-version': ANTHROPIC_VERSION}
+                if ENABLE_FORWARD_USER_INFO_HEADERS and user:
+                    headers = include_user_info_headers(headers, user)
 
             while True:
                 params = {'limit': 1000}
@@ -64,6 +86,7 @@ async def get_anthropic_models(url: str, key: str, user: UserModel = None) -> di
                 async with session.get(
                     f'{url}/models',
                     headers=headers,
+                    cookies=cookies,
                     params=params,
                     ssl=AIOHTTP_CLIENT_SESSION_SSL,
                 ) as response:
@@ -128,7 +151,7 @@ def is_anthropic_messages_passthrough(url: str, api_config: dict | None = None) 
     api_config = api_config or {}
     provider = str(api_config.get('provider', '')).lower()
 
-    return is_anthropic_url(url or '') or provider == 'litellm'
+    return uses_anthropic_messages(url or '', api_config) or provider == 'litellm'
 
 
 def convert_anthropic_payload_to_chat_completions(

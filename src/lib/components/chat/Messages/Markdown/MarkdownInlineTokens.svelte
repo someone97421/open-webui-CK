@@ -31,6 +31,9 @@
 	import CodespanToken from './MarkdownInlineTokens/CodespanToken.svelte';
 	import MentionToken from './MarkdownInlineTokens/MentionToken.svelte';
 	import NoteLinkToken from './MarkdownInlineTokens/NoteLinkToken.svelte';
+	import FileLinkToken from './MarkdownInlineTokens/FileLinkToken.svelte';
+	import { parseChatFileLink } from '$lib/utils/chatFiles';
+	const chatFileLinks = getContext<{ chatId: string } | undefined>('chat-file-links');
 	import SourceToken from './SourceToken.svelte';
 
 	export let id: string;
@@ -108,7 +111,10 @@
 		<HtmlToken {id} {token} {onSourceClick} />
 	{:else if token.type === 'link'}
 		{@const linkToken = getLinkToken(token)}
-		{#if linkToken.noteId && !markdown?.document && markdown?.allowRemoteContent !== false}
+		{@const fileReference = chatFileLinks?.chatId && !markdown?.document && markdown?.allowRemoteContent !== false && typeof window !== 'undefined' ? parseChatFileLink(linkToken.href, window.location.origin) : null}
+		{#if fileReference}
+			<FileLinkToken reference={fileReference} chatId={chatFileLinks.chatId} text={linkToken.text} />
+		{:else if linkToken.noteId && !markdown?.document && markdown?.allowRemoteContent !== false}
 			<NoteLinkToken noteId={linkToken.noteId} href={linkToken.href} />
 		{:else if token.tokens && !linkToken.isAutolink}
 			<a

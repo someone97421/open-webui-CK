@@ -15,7 +15,7 @@ from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.automations import Automations
 from open_webui.models.chat_messages import ChatMessages
-from open_webui.models.chats import Chats
+from open_webui.models.chats import Chat, Chats
 from open_webui.models.config import Config
 from open_webui.models.folders import (
     FolderForm,
@@ -34,7 +34,9 @@ from open_webui.utils.access_control import (
 )
 from open_webui.utils.access_control.files import can_read_all_folder_files, get_accessible_folder_files
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.projects import get_project_for_folder, project_config, validate_project_terminal
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -82,6 +84,55 @@ async def check_folders_permission(request: Request, user, db=None):
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
+
+
+def validate_project_data(data: dict | None) -> dict | None:
+    project = (data or {}).get('project')
+    if project is None:
+        return None
+    if (
+        not isinstance(project, dict)
+        or type(project.get('version')) is not int
+        or project['version'] != 1
+        or not isinstance(project.get('terminal_id'), str)
+        or not project['terminal_id'].strip()
+        or type(project.get('archived')) is not bool
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='项目配置需要 version=1、非空 terminal_id 和布尔值 archived',
+        )
+    return project
+
+
+async def validate_project_update(request: Request, user, folder, data: dict, db: AsyncSession):
+    previous = project_config(folder)
+    if previous and isinstance(data.get('project'), dict):
+        data['project'] = {**previous, **data['project']}
+    project = validate_project_data(data)
+    if not previous and not project:
+        return
+
+    children = await Folders.get_children_folders_by_id_and_user_id(folder.id, folder.user_id, db=db) or []
+    folder_ids = [folder.id, *[child.id for child in children]]
+    has_chats = (
+        await db.execute(select(Chat.id).where(Chat.folder_id.in_(folder_ids)).limit(1))
+    ).scalar_one_or_none() is not None
+    if previous and has_chats and (not project or previous['terminal_id'] != project['terminal_id']):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='项目已有聊天，不能更换 Terminal 或移除项目标记；首版暂不支持工作区迁移',
+        )
+    if project:
+        if folder.parent_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='项目只能位于顶层')
+        if not previous and (has_chats or children or folder.items or (folder.data or {}).get('files')):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='非空文件夹不能直接升级为项目；首版暂不支持工作区迁移',
+            )
+        if not previous or project['terminal_id'] != previous['terminal_id']:
+            await validate_project_terminal(request, user, project['terminal_id'])
 
 
 # Get Folders
@@ -135,7 +186,9 @@ async def get_folders(
     unread_counts = await get_folder_unread_counts(user.id, db=db)
 
     return [
-        FolderNameIdResponse(**folder.model_dump(), unread_count=unread_counts.get(folder.id, 0))
+        FolderNameIdResponse(
+            **folder.model_dump(), project=project_config(folder), unread_count=unread_counts.get(folder.id, 0)
+        )
         for folder in folder_list
     ]
 
@@ -151,6 +204,13 @@ async def create_folder(
     db: AsyncSession = Depends(get_async_session),
 ):
     await check_folders_permission(request, user, db=db)
+    project = validate_project_data(form_data.data)
+    if project:
+        if form_data.parent_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='项目只能位于顶层')
+        await validate_project_terminal(request, user, project['terminal_id'])
+    if form_data.parent_id and await get_project_for_folder(form_data.parent_id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='首版项目暂不支持子文件夹')
     folder = await Folders.get_folder_by_parent_id_and_user_id_and_name(
         form_data.parent_id, user.id, form_data.name, db=db
     )
@@ -254,6 +314,7 @@ async def get_shared_folders(
     results = [
         {
             **folder.model_dump(),
+            'project': project_config(folder),
             'owner_name': owner_names.get(folder.user_id, 'Unknown'),
             'permission': 'write' if folder.user_id == user.id else folder_perms[folder.id],
         }
@@ -273,6 +334,7 @@ async def get_shared_folders(
             else:
                 result_by_id[child.id] = {
                     **child.model_dump(),
+                    'project': project_config(child),
                     'owner_name': owner_names.get(child.user_id, 'Unknown'),
                     'permission': permission,
                 }
@@ -342,6 +404,9 @@ async def update_folder_name_by_id(
             )
 
     if folder:
+        if form_data.data is not None and 'project' in form_data.data:
+            await validate_project_update(request, user, folder, form_data.data, db)
+
         if (
             user.role != 'admin'
             and user.id != folder.user_id
@@ -424,6 +489,17 @@ async def update_folder_parent_id_by_id(
     await check_folders_permission(request, user, db=db)
     folder = await Folders.get_folder_by_id_and_user_id(id, user.id, db=db)
     if folder:
+        if form_data.parent_id != folder.parent_id:
+            children = await Folders.get_children_folders_by_id_and_user_id(id, folder.user_id, db=db) or []
+            if (
+                await get_project_for_folder(folder.id)
+                or (form_data.parent_id and await get_project_for_folder(form_data.parent_id))
+                or any(project_config(child) for child in children)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail='首版暂不支持移动项目或跨项目移动文件夹；工作区文件将保留',
+                )
         existing_folder = await Folders.get_folder_by_parent_id_and_user_id_and_name(
             form_data.parent_id, user.id, folder.name, db=db
         )
@@ -717,6 +793,12 @@ async def delete_folder_by_id(
     folder_owner_id = folder.user_id
 
     folder_ids = await Folders.get_folder_ids_by_id_and_user_id_in_subtree(id, folder_owner_id, db=db)
+    subtree = await Folders.get_folders_by_ids(folder_ids, db=db)
+    if await get_project_for_folder(id) or any(project_config(item) for item in subtree):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='请归档项目；工作区文件将保留',
+        )
     if delete_contents and await Chats.count_chats_by_folder_ids_and_user_id(folder_ids, folder_owner_id, db=db):
         chat_delete_permission = await has_permission(
             user.id, 'chat.delete', await Config.get('user.permissions'), db=db

@@ -146,6 +146,45 @@ export const registerTemporaryChat = async (token: string, chatId: string, sessi
 	return result;
 };
 
+export type ProjectAgents = {
+	content: string;
+};
+
+const projectAgentsRequest = async (
+	token: string,
+	projectId: string,
+	method: 'GET' | 'PUT',
+	content?: string
+): Promise<ProjectAgents> => {
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/terminals/projects/${encodeURIComponent(projectId)}/agents`,
+		{
+			method,
+			headers: {
+				Accept: 'application/json',
+				...(method === 'PUT' ? { 'Content-Type': 'application/json' } : {}),
+				authorization: `Bearer ${token}`
+			},
+			...(method === 'PUT' ? { body: JSON.stringify({ content: content ?? '' }) } : {})
+		}
+	);
+	const result = await response.json().catch(() => null);
+	if (!response.ok) {
+		throw new Error(
+			typeof result?.detail === 'string'
+				? result.detail
+				: `AGENTS.md 请求失败（${response.status}）`
+		);
+	}
+	return { content: typeof result?.content === 'string' ? result.content : '' };
+};
+
+export const getProjectAgents = (token: string, projectId: string) =>
+	projectAgentsRequest(token, projectId, 'GET');
+
+export const updateProjectAgents = (token: string, projectId: string, content: string) =>
+	projectAgentsRequest(token, projectId, 'PUT', content);
+
 export type TerminalConnection = {
 	selector: string;
 	baseUrl: string;

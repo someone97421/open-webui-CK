@@ -1940,7 +1940,15 @@ def get_reasoning_format(model: dict) -> str | None:
 
 def strip_reasoning_details(output: list) -> list:
     return [
-        {key: value for key, value in item.items() if key != 'reasoning_details'} if isinstance(item, dict) else item
+        {
+            key: value
+            for key, value in item.items()
+            if key not in (
+                {'reasoning_details', 'encrypted_content', 'id'}
+                if item.get('type') == 'reasoning'
+                else {'reasoning_details'}
+            )
+        } if isinstance(item, dict) else item
         for item in output
     ]
 
@@ -2286,17 +2294,28 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     events = []
     sources = []
 
-    # Folder "Project" handling
-    # Check if the request has chat_id and is inside of a folder
-    # Uses lightweight column query — only fetches folder_id, not the full chat JSON blob
-    chat_id = metadata.get('chat_id', None)
-    folder_id = None
-    if user and is_saved_chat_id(chat_id):
-        folder_id = await Chats.get_chat_folder_id(chat_id, user.id)
+    from open_webui.utils.projects import get_project_for_folder, require_project_access, validate_project_terminal
 
-    # Fallback: use folder_id from metadata (temporary chats have no DB record)
-    if not folder_id:
-        folder_id = metadata.get('folder_id', None)
+    chat_id = metadata.get('chat_id')
+    folder_id = None
+    project = None
+    if user and is_saved_chat_id(chat_id):
+        saved_chat = await Chats.get_accessible_chat_by_id(chat_id, user, permission='write')
+        if not saved_chat and await Chats.is_chat_owner(chat_id, user.id):
+            saved_chat = await Chats.get_chat_by_id(chat_id)
+        if not saved_chat:
+            raise HTTPException(status_code=404, detail='Chat expired or unavailable')
+        folder_id = saved_chat.folder_id
+        project = await get_project_for_folder(folder_id)
+    elif metadata.get('folder_id'):
+        folder_id = metadata['folder_id']
+        if await get_project_for_folder(folder_id):
+            raise HTTPException(status_code=409, detail='项目会话需要先保存到项目')
+    project_settings = None
+    if project:
+        project_settings = await require_project_access(user, project)
+        await validate_project_terminal(request, user, project_settings['terminal_id'])
+    metadata['folder_id'] = folder_id
 
     if folder_id and user:
         folder = await Folders.get_folder_by_id(folder_id)
@@ -2382,6 +2401,21 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             raise Exception(f'{e}')
 
     features = form_data.pop('features', None) or {}
+    harness_chat = bool(chat_id and not metadata.get('automation_id') and not metadata.get('internal') and not chat_id.startswith('channel:'))
+    if project_settings:
+        form_data['terminal_id'] = project_settings['terminal_id']
+        features['code_interpreter'] = False
+    elif harness_chat:
+        form_data['terminal_id'] = None
+    if not ENABLE_TOOL_SERVERS:
+        form_data['terminal_id'] = None
+    metadata['terminal_id'] = form_data.get('terminal_id')
+    if harness_chat:
+        features['code_interpreter'] = bool(
+            not project and features.get('code_interpreter', True) and await Config.get('code_interpreter.enable')
+            and (user.role == 'admin' or await has_permission(user.id, 'features.code_interpreter', await Config.get('user.permissions')))
+        )
+        metadata['code_interpreter_engine'] = 'pyodide'
     extra_params['__features__'] = features
     if features:
         if 'voice' in features and features['voice']:
@@ -2432,7 +2466,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     form_data = await chat_image_generation_handler(request, form_data, extra_params, user)
 
         if 'code_interpreter' in features and features['code_interpreter']:
-            engine = await Config.get('code_interpreter.engine', 'pyodide')
+            engine = metadata.get('code_interpreter_engine') or await Config.get('code_interpreter.engine', 'pyodide')
 
             # Skip XML-tag prompt injection when native FC is enabled —
             # execute_code will be injected as a builtin tool instead
@@ -2459,6 +2493,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     tool_ids = form_data.pop('tool_ids', None)
     terminal_id = form_data.pop('terminal_id', None)
+    if harness_chat or project_settings:
+        tool_ids = [item for item in (tool_ids or []) if not item.startswith('terminal:')]
     if not ENABLE_TOOL_SERVERS:
         if terminal_id or metadata.get('tool_servers'):
             log.debug('Excluded external plugins disabled by plugin configuration')
@@ -5218,7 +5254,7 @@ async def streaming_chat_response_handler(response, ctx):
                                         and (
                                             existing_reasoning_item
                                             or any(
-                                                item.get('text') or item.get('summary') or item.get('data')
+                                                item.get('text') or item.get('summary') or item.get('data') or item.get('signature')
                                                 for item in reasoning_detail_items
                                             )
                                         )
@@ -5948,11 +5984,13 @@ async def streaming_chat_response_handler(response, ctx):
 
                         if ENABLE_RESPONSES_API_STATEFUL and last_response_id:
                             system_message = get_system_message(form_data['messages'])
+                            tool_outputs = [
+                                item for item in strip_tool_images(output, model)
+                                if item.get('type') == 'function_call_output'
+                            ]
                             new_form_data['messages'] = (
                                 [system_message] if system_message else []
-                            ) + convert_output_to_messages(
-                                strip_tool_images(output, model), raw=True, reasoning_format=get_reasoning_format(model)
-                            )
+                            ) + [{'role': 'assistant', 'output': tool_outputs}]
                             new_form_data['previous_response_id'] = last_response_id
                         else:
                             tool_messages = convert_output_to_messages(
@@ -6189,7 +6227,7 @@ async def streaming_chat_response_handler(response, ctx):
                                     """)
                                     code = blocking_code + '\n' + code
 
-                                ci_engine = await Config.get('code_interpreter.engine')
+                                ci_engine = metadata.get('code_interpreter_engine') or await Config.get('code_interpreter.engine')
                                 if ci_engine == 'pyodide':
                                     ci_output = await event_caller(
                                         {
@@ -6198,6 +6236,7 @@ async def streaming_chat_response_handler(response, ctx):
                                                 'id': str(uuid4()),
                                                 'code': code,
                                                 'session_id': metadata.get('session_id', None),
+                                                'chat_id': metadata.get('chat_id'),
                                                 'files': metadata.get('files', []),
                                             },
                                         }

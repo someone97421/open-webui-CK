@@ -41,7 +41,7 @@
 	let prefixId = '';
 	let enable = true;
 	let apiVersion = '';
-	let apiType = ''; // '' = chat completions (default), 'responses' = Responses API
+	let apiType = '';
 
 	let headers = '';
 	let passthroughParams = '';
@@ -135,6 +135,7 @@
 					...(provider ? { provider } : {}),
 					...(azure ? { azure: true } : {}),
 					api_version: apiVersion,
+					...(apiType ? { api_type: apiType } : {}),
 					passthrough_params: parsePassthroughParams(passthroughParams),
 					...(_headers ? { headers: _headers } : {})
 				}
@@ -315,6 +316,11 @@
 			!direct &&
 			provider === '' &&
 			!/\/openai\/v1(\/|$)/.test(url));
+	$: if (azure && apiType === 'messages') {
+		apiType = '';
+	} else if (!ollama && !direct && !azure && !apiType && /^https?:\/\/api\.anthropic\.com(?::\d+)?(?:\/|$)/i.test(url)) {
+		apiType = 'messages';
+	}
 
 	onMount(() => {
 		init();
@@ -513,20 +519,17 @@
 								>
 
 								<div>
-									<button
-										on:click={() => {
-											apiType = apiType === 'responses' ? '' : 'responses';
-										}}
-										type="button"
+									<select
+										bind:value={apiType}
 										id="api-type-toggle"
-										class=" text-xs text-gray-700 dark:text-gray-300"
+										class="bg-transparent text-xs text-gray-700 dark:text-gray-300 outline-hidden"
 									>
-										{#if apiType === 'responses'}
-											{$i18n.t('Responses')}
-										{:else}
-											{$i18n.t('Chat Completions')}
+										<option value="">{$i18n.t('Chat Completions')}</option>
+										<option value="responses">{$i18n.t('Responses')}</option>
+										{#if !azure}
+											<option value="messages">Anthropic Messages</option>
 										{/if}
-									</button>
+									</select>
 								</div>
 							</div>
 						{/if}

@@ -293,6 +293,79 @@ async def prepare_terminal_chat(request: Request, form_data: dict, user=Depends(
     return {'chat_id': chat_id}
 
 
+async def _project_agents_context(request, user, project_id):
+    from open_webui.models.folders import Folders
+    from open_webui.utils.projects import require_project_access, validate_project_terminal
+    from open_webui.utils.tools import build_tool_server_headers
+
+    project = await Folders.get_folder_by_id(project_id)
+    config = await require_project_access(user, project, allow_archived=request.method == 'GET')
+    connection = await validate_project_terminal(request, user, config['terminal_id'])
+    request.state.project_settings_id = project_id
+    headers, cookies = await build_tool_server_headers(connection, request, user)
+    headers = await terminal_identity_headers(request, connection, user, f'project:{project_id}', headers)
+    return connection, headers, cookies
+
+
+async def _project_agents_request(request, user, project_id, content=None):
+    from open_webui.env import AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL
+    from open_webui.utils.terminals import MAX_AGENTS_MD_BYTES
+
+    connection, headers, cookies = await _project_agents_context(request, user, project_id)
+    base = get_terminal_server_url(connection)
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), trust_env=True) as session:
+            async with session.get(f'{base}/files/cwd', headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL, allow_redirects=False) as response:
+                if response.status != 200:
+                    raise HTTPException(status_code=502, detail='无法打开项目工作区')
+                cwd = await response.json()
+            home = cwd.get('home')
+            if not isinstance(home, str) or not posixpath.isabs(home):
+                raise HTTPException(status_code=502, detail='项目工作区路径无效')
+            path = posixpath.join(home, 'AGENTS.md')
+            if content is not None:
+                async with session.post(f'{base}/files/write', json={'path': path, 'content': content}, headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL, allow_redirects=False) as response:
+                    if response.status != 200:
+                        raise HTTPException(status_code=502, detail='保存项目 AGENTS.md 失败')
+                return {'content': content}
+            async with session.get(f'{base}/files/read', params={'path': path}, headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL, allow_redirects=False) as response:
+                if response.status == 404:
+                    return {'content': ''}
+                if response.status != 200:
+                    raise HTTPException(status_code=502, detail='读取项目 AGENTS.md 失败')
+                chunks = bytearray()
+                async for chunk in response.content.iter_chunked(8192):
+                    chunks.extend(chunk)
+                    if len(chunks) > MAX_AGENTS_MD_BYTES * 6 + 4096:
+                        raise HTTPException(status_code=413, detail='AGENTS.md 超过 32 KiB')
+                data = json.loads(chunks)
+                text = data.get('content') if isinstance(data, dict) else None
+                if not isinstance(text, str):
+                    raise HTTPException(status_code=502, detail='项目 AGENTS.md 内容无效')
+                if len(text.encode('utf-8')) > MAX_AGENTS_MD_BYTES:
+                    raise HTTPException(status_code=413, detail='AGENTS.md 超过 32 KiB')
+                return {'content': text}
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail='项目 Terminal 暂时不可用') from exc
+
+
+@router.get('/projects/{project_id}/agents')
+async def get_project_agents(project_id: str, request: Request, user=Depends(get_verified_user)):
+    return await _project_agents_request(request, user, project_id)
+
+
+@router.put('/projects/{project_id}/agents')
+async def update_project_agents(project_id: str, request: Request, form_data: dict, user=Depends(get_verified_user)):
+    from open_webui.utils.terminals import MAX_AGENTS_MD_BYTES
+
+    content = form_data.get('content')
+    if not isinstance(content, str):
+        raise HTTPException(status_code=400, detail='AGENTS.md 内容必须是文本')
+    if len(content.encode('utf-8')) > MAX_AGENTS_MD_BYTES:
+        raise HTTPException(status_code=413, detail='AGENTS.md 超过 32 KiB')
+    return await _project_agents_request(request, user, project_id, content)
+
+
 @router.get('/')
 async def list_terminal_servers(request: Request, user=Depends(get_verified_user)):
     """Return terminal servers the authenticated user has access to."""
@@ -415,6 +488,10 @@ async def proxy_terminal(
             'last-event-id',
             'range',
         ):
+            if value := request.headers.get(name):
+                headers[name] = value
+    if safe_path == 'files/view' or safe_path.startswith('files/serve/'):
+        for name in ('range', 'if-range'):
             if value := request.headers.get(name):
                 headers[name] = value
 

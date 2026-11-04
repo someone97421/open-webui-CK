@@ -35,6 +35,14 @@
 		updateChatFolderIdById,
 		importChats
 	} from '$lib/apis/chats';
+	import {
+		getFolderProject,
+		isArchivedProject,
+		isCrossProjectChatMove,
+		isProjectFolder,
+		PROJECT_CHAT_MOVE_ERROR,
+		PROJECT_IMPORT_ERROR
+	} from '$lib/utils/projects';
 
 	import ChevronDown from './icons/ChevronDown.svelte';
 	import ChevronRight from './icons/ChevronRight.svelte';
@@ -179,6 +187,8 @@
 	};
 
 	$: isWritable = !folders[folderId]?.shared || folders[folderId]?.permission === 'write';
+	$: isProject = isProjectFolder(folders[folderId]);
+	$: projectArchived = isArchivedProject(folders[folderId]);
 
 	const onDragOver = (e) => {
 		e.stopPropagation();
@@ -240,22 +250,25 @@
 
 							const { type, id, item } = data;
 
-							if (type === 'folder') {
-								open = true;
-								if (id === folderId) {
-									return;
+						if (type === 'folder') {
+							if (isProject || isProjectFolder(folders[id])) {
+								toast.error('项目不支持子文件夹或移动文件夹。');
+								return;
+							}
+							open = true;
+							if (id === folderId) {
+								return;
+							}
+							const res = await updateFolderParentIdById(localStorage.token, id, folderId).catch(
+								(error) => {
+									toast.error(`${error}`);
+									return null;
 								}
-								// Move the folder
-								const res = await updateFolderParentIdById(localStorage.token, id, folderId).catch(
-									(error) => {
-										toast.error(`${error}`);
-										return null;
-									}
-								);
+							);
 
-								if (res) {
-									dispatch('update');
-								}
+							if (res) {
+								dispatch('update');
+							}
 							} else if (type === 'chat') {
 								open = true;
 
@@ -263,6 +276,10 @@
 									return null;
 								});
 								if (!chat && item) {
+								if (isProject) {
+									toast.error(PROJECT_IMPORT_ERROR);
+									return;
+								}
 									if (!($user?.role === 'admin' || ($user?.permissions?.chat?.import ?? true))) {
 										toast.error($i18n.t('Access prohibited'));
 										return;
@@ -283,27 +300,34 @@
 									});
 								}
 
-								if (chat) {
-									// Move the chat
-									const res = await updateChatFolderIdById(
-										localStorage.token,
-										chat.id,
-										folderId
-									).catch((error) => {
-										toast.error(`${error}`);
-										return null;
-									});
-
-									onItemMove({
-										originFolderId: chat.folder_id,
-										targetFolderId: folderId,
-										e
-									});
-
-									if (res) {
-										dispatch('update');
-									}
+							if (chat) {
+								const sourceFolder = chat.folder_id
+									? (folders[chat.folder_id] ??
+										(await getFolderById(localStorage.token, chat.folder_id).catch(() => null)))
+									: null;
+								if (isCrossProjectChatMove(sourceFolder, folders[folderId])) {
+									toast.error(PROJECT_CHAT_MOVE_ERROR);
+									return;
 								}
+								const res = await updateChatFolderIdById(
+									localStorage.token,
+									chat.id,
+									folderId
+								).catch((error) => {
+									toast.error(`${error}`);
+									return null;
+								});
+
+								onItemMove({
+									originFolderId: chat.folder_id,
+									targetFolderId: folderId,
+									e
+								});
+
+								if (res) {
+									dispatch('update');
+								}
+							}
 							}
 						} catch (error) {
 							console.log('Error parsing dataTransfer:', error);
@@ -467,7 +491,33 @@
 
 	let showDeleteConfirm = false;
 
+	const setProjectArchived = async (archived) => {
+		const fullFolder = await getFolderById(localStorage.token, folderId).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		const project = getFolderProject(fullFolder);
+		if (!fullFolder || !project) return null;
+		const data = { ...fullFolder.data, project: { ...project, archived } };
+		const res = await updateFolderById(localStorage.token, folderId, { data }).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		if (!res) return null;
+		const updatedFolder = { ...fullFolder, ...res, data };
+		folders[folderId] = { ...folders[folderId], ...updatedFolder };
+		if ($selectedFolder?.id === folderId) selectedFolder.set(updatedFolder);
+		toast.success(archived ? '项目已归档，会话和文件已保留' : '项目已恢复');
+		if (archived) onDelete(folderId);
+		else dispatch('update');
+		return updatedFolder;
+	};
+
 	const deleteHandler = async () => {
+		if (isProject) {
+			await setProjectArchived(true);
+			return;
+		}
 		const res = await deleteFolderById(localStorage.token, folderId, deleteFolderContents).catch(
 			(error) => {
 				toast.error(`${error}`);
@@ -485,11 +535,10 @@
 		name = name?.trim();
 		if (!name) {
 			toast.error($i18n.t('Folder name cannot be empty.'));
-			return;
+			return null;
 		}
 
 		const currentName = folders[folderId].name;
-
 		folders[folderId].name = name;
 
 		const res = await updateFolderById(localStorage.token, folderId, {
@@ -498,32 +547,28 @@
 			...(data ? { data } : {})
 		}).catch((error) => {
 			toast.error(`${error}`);
-
 			folders[folderId].name = currentName;
 			return null;
 		});
+		if (!res) return null;
 
-		if (res) {
-			folders[folderId].name = name;
-			if (data) {
-				folders[folderId].data = data;
+		folders[folderId].name = name;
+		if (data) folders[folderId].data = data;
+		toast.success($i18n.t('Folder updated successfully'));
+
+		let updatedFolder = { ...folders[folderId], ...res };
+		if ($selectedFolder?.id === folderId) {
+			const folder = await getFolderById(localStorage.token, folderId).catch((error) => {
+				toast.error(`${error}`);
+				return null;
+			});
+			if (folder) {
+				updatedFolder = { ...updatedFolder, ...folder };
+				await selectedFolder.set(updatedFolder);
 			}
-
-			// toast.success($i18n.t('Folder name updated successfully'));
-			toast.success($i18n.t('Folder updated successfully'));
-
-			if ($selectedFolder?.id === folderId) {
-				const folder = await getFolderById(localStorage.token, folderId).catch((error) => {
-					toast.error(`${error}`);
-					return null;
-				});
-
-				if (folder) {
-					await selectedFolder.set(folder);
-				}
-			}
-			dispatch('update');
 		}
+		dispatch('update');
+		return updatedFolder;
 	};
 
 	const isExpandedUpdateHandler = async () => {
@@ -700,41 +745,47 @@
 
 <DeleteConfirmDialog
 	bind:show={showDeleteConfirm}
-	title={$i18n.t('Delete folder?')}
-	on:confirm={() => {
-		deleteHandler();
-	}}
+	title={isProject ? '归档项目？' : $i18n.t('Delete folder?')}
+	confirmLabel={isProject ? '归档项目' : $i18n.t('Delete')}
+	on:confirm={deleteHandler}
 >
-	<div class=" text-sm text-gray-700 dark:text-gray-300 flex-1 line-clamp-3 mb-2">
-		<!-- {$i18n.t('This will delete <strong>{{NAME}}</strong> and <strong>all its contents</strong>.', {
-				NAME: folders[folderId].name
-			})} -->
-
-		{$i18n.t(`Are you sure you want to delete "{{NAME}}"?`, {
-			NAME: folders[folderId].name
-		})}
+	<div class="mb-2 flex-1 text-sm text-gray-700 dark:text-gray-300">
+		{isProject
+			? `归档“${folders[folderId].name}”后，会话和文件都会保留，可随时恢复。`
+			: $i18n.t(`Are you sure you want to delete "{{NAME}}"?`, {
+					NAME: folders[folderId].name
+				})}
 	</div>
 
-	<div class="flex items-center gap-1.5">
-		<input
-			aria-label={$i18n.t('Delete all contents inside this folder')}
-			type="checkbox"
-			bind:checked={deleteFolderContents}
-		/>
-
-		<div class="text-xs text-gray-500">
-			{$i18n.t('Delete all contents inside this folder')}
+	{#if !isProject}
+		<div class="flex items-center gap-1.5">
+			<input
+				aria-label={$i18n.t('Delete all contents inside this folder')}
+				type="checkbox"
+				bind:checked={deleteFolderContents}
+			/>
+			<div class="text-xs text-gray-500">
+				{$i18n.t('Delete all contents inside this folder')}
+			</div>
 		</div>
-	</div>
+	{/if}
 </DeleteConfirmDialog>
 
-<FolderModal bind:show={showFolderModal} edit={true} {folderId} onSubmit={updateHandler} />
-
 <FolderModal
-	bind:show={showCreateSubFolderModal}
-	parentId={createSubFolderParentId}
-	onSubmit={createSubFolderHandler}
+	bind:show={showFolderModal}
+	edit={true}
+	{folderId}
+	project={isProject}
+	onSubmit={updateHandler}
 />
+
+{#if !isProject}
+	<FolderModal
+		bind:show={showCreateSubFolderModal}
+		parentId={createSubFolderParentId}
+		onSubmit={createSubFolderHandler}
+	/>
+{/if}
 
 {#if dragged && x && y}
 	<DragGhost {x} {y}>
@@ -753,7 +804,7 @@
 	bind:this={folderElement}
 	class="relative {className}"
 	role="listitem"
-	draggable={!folders[folderId]?.shared}
+	draggable={!isProject && !folders[folderId]?.shared}
 >
 	{#if draggedOver}
 		<div
@@ -925,6 +976,9 @@
 						on:pointerdown={() => (openPreview = false)}
 					>
 						<FolderMenu
+							{isProject}
+							{projectArchived}
+							onRestore={() => setProjectArchived(false)}
 							onNewChat={openFolderHandler}
 							onEdit={() => {
 								showFolderModal = true;
@@ -1034,6 +1088,9 @@
 										readonly={chat.user_id !== $user?.id}
 										canMove={folders[folderId]?.user_id === $user?.id}
 										canRename={folders[folderId]?.user_id === $user?.id}
+										preserveSelectedFolder={isProject}
+										currentFolderId={folderId}
+										allowDrag={!isProject}
 										{shiftKey}
 										onReadStateChange={applyReadState}
 										on:change={(e) => {

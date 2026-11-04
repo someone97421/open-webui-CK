@@ -60,6 +60,10 @@
 		}
 	});
 
+	setContext('chat-file-links', {
+		get chatId() { return chatId; }
+	});
+
 	export let sourceIds = [];
 
 	export let onSave = () => {};
