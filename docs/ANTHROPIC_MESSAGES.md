@@ -8,20 +8,27 @@
 
 ## 思考参数
 
-未指定输出上限时默认 `max_tokens=4096`。普通 `reasoning_effort` 映射为固定的 thinking 预算：
+未指定输出上限时默认 `max_tokens=4096`。配置通用 `reasoning_effort` 时，使用 `thinking: {"type":"adaptive"}`，并映射为原生 `output_config.effort`：
 
-| effort | budget_tokens |
-| --- | ---: |
-| minimal | 1024 |
-| low | 2048 |
-| medium | 4096 |
-| high | 8192 |
-| xhigh | 16384 |
-| none / disabled | 关闭 |
+| reasoning_effort | output_config.effort |
+| --- | --- |
+| minimal | low |
+| low | low |
+| medium | medium |
+| high | high |
+| xhigh | xhigh |
+| max | max |
+| none / disabled | 关闭 thinking，不生成 effort |
 
-这是本适配层的预算映射。可在模型的自定义参数中显式配置原生 `thinking`、`output_config`，显式配置优先；具体模型是否接受 enabled/adaptive 等模式由供应商决定，不按模型名称猜测。
+档位字符串会去除两端空白并转为小写；空字符串按未配置处理。除 `minimal` 归一为 `low` 外，不静默降低档位。具体模型支持哪些 effort 由供应商判断；例如 Sonnet 5.5 使用 adaptive thinking，已不接受手动预算。未配置通用档位时，不自动开启思考。
 
-开启思考时不转发采样参数，以避免协议冲突。未指定输出上限且额度不足时，自动设为思考预算加 4096；显式输出上限必须大于思考预算。强制指定工具、或工具续聊缺少有效思考块时，本次请求不启用思考，以保留工具调用的可用性。
+原生自定义参数优先：显式 `thinking` 的 enabled/disabled 模式不受通用档位影响；显式 adaptive 模式可从通用档位补齐 effort；已有 `output_config.effort` 不覆盖。`output_config` 的其他字段（例如 format）保留，并可同时补齐 effort。
+
+**旧模型兼容：** 通用档位不再自动生成固定思考预算。只接受旧式预算的模型，需在自定义参数中显式配置，例如 `thinking={"type":"enabled","budget_tokens":8192}`。未指定输出上限且额度不足时，仍自动设为预算加 4096；显式输出上限必须大于预算。原生自定义参数不按模型名称推断或改写。
+
+开启思考时不转发采样参数，以避免协议冲突。强制指定工具、或工具续聊缺少有效思考块时，本次请求不启用思考，以保留工具调用的可用性。
+
+协议参考：Claude 官方文档的 [Effort](https://platform.claude.com/docs/en/build-with-claude/effort) 与 [Extended thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)。
 
 ## 范围与验证
 

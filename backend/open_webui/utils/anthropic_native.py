@@ -253,14 +253,25 @@ def convert_chat_completions_to_anthropic(payload: dict) -> dict:
         result['tool_choice'] = choice
 
     effort = payload.get('reasoning_effort')
-    if effort is not None and 'thinking' not in result and 'output_config' not in result:
-        budgets = {'minimal': 1024, 'low': 2048, 'medium': 4096, 'high': 8192, 'xhigh': 16384}
-        if effort in ('none', 'disabled'):
-            result['thinking'] = {'type': 'disabled'}
-        elif effort in budgets:
-            result['thinking'] = {'type': 'enabled', 'budget_tokens': budgets[effort]}
-        else:
-            raise ValueError('不支持的 Anthropic reasoning_effort，请显式配置 thinking 或 output_config')
+    if isinstance(effort, str):
+        effort = effort.strip().lower() or None
+    thinking = result.get('thinking') or {}
+    output_config = result.get('output_config') or {}
+    if effort is not None and thinking.get('type') in (None, 'adaptive'):
+        if 'effort' not in output_config:
+            levels = {'minimal': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'xhigh': 'xhigh', 'max': 'max'}
+            if effort in ('none', 'disabled'):
+                if 'thinking' not in result:
+                    result['thinking'] = {'type': 'disabled'}
+            elif effort in levels:
+                output_config['effort'] = levels[effort]
+                result['output_config'] = output_config
+                result.setdefault('thinking', {'type': 'adaptive'})
+            else:
+                raise ValueError(
+                    f'不支持的 Anthropic reasoning_effort: {effort!r}，'
+                    '可用值为 none、disabled、minimal、low、medium、high、xhigh、max'
+                )
     thinking = result.get('thinking') or {}
     if thinking.get('type') in ('enabled', 'adaptive'):
         last_assistant = next((message for message in reversed(messages) if message['role'] == 'assistant'), None)
