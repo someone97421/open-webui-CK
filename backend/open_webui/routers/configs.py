@@ -4,7 +4,8 @@ import logging
 from typing import Any, Optional
 
 import aiohttp
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from mcp.shared.auth import OAuthMetadata
 from open_webui.config import BannerModel
 from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT, ENABLE_TOOL_SERVERS
@@ -25,6 +26,12 @@ from open_webui.utils.oauth import (
     recover_oauth_client_metadata,
     resolve_oauth_client_info,
 )
+from open_webui.utils.site_branding import (
+    LOGO_MAX_BYTES,
+    get_branding_logo_path,
+    save_branding_logo,
+    validate_branding_logo_url,
+)
 from open_webui.utils.tools import (
     get_tool_server_data,
     get_tool_server_url,
@@ -32,6 +39,7 @@ from open_webui.utils.tools import (
     set_tool_servers,
 )
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -139,6 +147,75 @@ async def set_interface_visibility(request: Request, form_data: InterfaceVisibil
         data={'keys': ['ui.visibility']},
     )
     return form_data
+
+
+class InterfaceBrandingForm(BaseModel):
+    name: str
+    logo_url: str
+
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) > 128:
+            raise ValueError('Site name must not exceed 128 characters.')
+        return value
+
+    @field_validator('logo_url')
+    @classmethod
+    def validate_logo_url(cls, value: str) -> str:
+        return validate_branding_logo_url(value)
+
+
+@router.get('/interface/branding', response_model=dict[str, str])
+async def get_interface_branding(user=Depends(get_admin_user)):
+    values = await Config.get_many('ui.custom_name', 'ui.custom_logo_url')
+    return {'name': values.get('ui.custom_name', ''), 'logo_url': values.get('ui.custom_logo_url', '')}
+
+
+@router.post('/interface/branding', response_model=InterfaceBrandingForm)
+async def set_interface_branding(
+    request: Request, form_data: InterfaceBrandingForm, user=Depends(get_admin_user)
+):
+    await Config.upsert({'ui.custom_name': form_data.name, 'ui.custom_logo_url': form_data.logo_url})
+    await publish_event(
+        request,
+        EVENTS.CONFIG_UPDATED,
+        actor=user,
+        subject_id='interface',
+        subject_type='config',
+        data={'keys': ['ui.custom_name', 'ui.custom_logo_url']},
+    )
+    return form_data
+
+
+@router.post('/interface/branding/logo', response_model=dict[str, str])
+async def upload_interface_branding_logo(file: UploadFile = File(...), user=Depends(get_admin_user)):
+    try:
+        data = await file.read(LOGO_MAX_BYTES + 1)
+        if len(data) > LOGO_MAX_BYTES:
+            raise HTTPException(status_code=413, detail='Logo must not exceed 10 MiB.')
+        url = await run_in_threadpool(save_branding_logo, data)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except OSError as error:
+        log.error('Unable to save site logo', exc_info=True)
+        raise HTTPException(status_code=500, detail='Unable to save logo.') from error
+    finally:
+        await file.close()
+    return {'url': url}
+
+
+@router.get('/interface/branding/logo/{filename}')
+async def get_interface_branding_logo(filename: str):
+    path = get_branding_logo_path(filename)
+    if path is None:
+        raise HTTPException(status_code=404, detail='Logo not found.')
+    return FileResponse(
+        path,
+        media_type='image/png',
+        headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=31536000, immutable'},
+    )
 
 
 # Connections Config

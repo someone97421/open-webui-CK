@@ -75,6 +75,8 @@
 	import MCPApp from '$lib/components/chat/Messages/MCPApp.svelte';
 	import OutputEditView from './OutputEditView.svelte';
 	import { getOutputText, replaceOutputMessageText, type OutputItem } from './structuredOutput';
+	import ToolOutputFile from './ToolOutputFile.svelte';
+	import { chatFileAttachmentKey, isChatFileAttachment } from '$lib/utils/chatFiles';
 
 	interface MessageType {
 		user_id?: string;
@@ -83,7 +85,7 @@
 		content: string;
 		output?: OutputItem[];
 		contextSummary?: string;
-		files?: { type: string; url: string }[];
+		files?: { type: string; url?: string; [key: string]: any }[];
 		timestamp: number;
 		role: string;
 		statusHistory?: {
@@ -734,9 +736,13 @@
 								class="my-1 w-full flex overflow-x-auto gap-2 flex-wrap"
 								dir={$settings?.chatDirection ?? 'auto'}
 							>
-								{#each message.files.filter((f) => ['image', 'file'].includes(f.type)) as file}
-									<div>
-										{#if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
+								{#each message.files.filter((f) => ['image', 'file'].includes(f.type)).filter((file, index, files) => !isChatFileAttachment(file) || files.findIndex((other) => isChatFileAttachment(other) && chatFileAttachmentKey(other) === chatFileAttachmentKey(file)) === index) as file}
+									<div class:w-full={isChatFileAttachment(file)}>
+										{#if isChatFileAttachment(file)}
+											{#key JSON.stringify([chatId, file])}
+												<ToolOutputFile item={file} {chatId} attachment={$settings?.terminalFileDisplay !== 'inline'} />
+											{/key}
+										{:else if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
 											<Image src={file.url} alt={file.name || $i18n.t('Generated Image')} />
 										{:else}
 											<FileItem

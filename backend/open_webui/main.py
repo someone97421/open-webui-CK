@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from uuid import uuid4
+from xml.sax.saxutils import escape, quoteattr
 
 import aiohttp
 import anyio.to_thread
@@ -23,12 +24,12 @@ from fastapi import (
     status,
 )
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, URL
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import Response, StreamingResponse
@@ -285,6 +286,7 @@ from open_webui.utils.plugin import install_tool_and_function_dependencies
 from open_webui.utils.recurrence import RecurrenceEvaluationTimeout
 from open_webui.utils.redis import get_redis_client
 from open_webui.utils.session_pool import cleanup_response, get_client_timeout, get_session, stream_wrapper
+from open_webui.utils.site_branding import DEFAULT_LOGO_URL, get_site_branding
 from open_webui.utils.tool_approval import (
     ResolveToolCallForm,
     build_tool_approval_resume_payload,
@@ -2368,10 +2370,12 @@ async def get_app_config(request: Request):
         'ui.watermark',
     )
 
+    branding = await get_site_branding(app.state.WEBUI_NAME)
     return {
         **({'onboarding': True} if onboarding else {}),
         'status': True,
-        'name': app.state.WEBUI_NAME,
+        'name': branding['name'],
+        'logo_url': branding['logo_url'],
         'version': VERSION,
         'default_locale': str(DEFAULT_LOCALE),
         'i18n': config.get('ui.i18n') or {},
@@ -2961,10 +2965,12 @@ async def get_manifest_json():
         # including names, logos, manifests, metadata, and surrounding UI.
         # Do not alter, remove, obscure, or replace it except as LICENSE permits:
         # https://docs.openwebui.com/license.
+        branding = await get_site_branding(app.state.WEBUI_NAME)
+        custom_logo = branding['logo_url'] != DEFAULT_LOGO_URL
         return {
-            'name': app.state.WEBUI_NAME,
-            'short_name': app.state.WEBUI_NAME,
-            'description': f'{app.state.WEBUI_NAME} is an open, extensible, user-friendly interface for AI that adapts to your workflow.',
+            'name': branding['name'],
+            'short_name': branding['name'],
+            'description': f'{branding["name"]} is an open, extensible, user-friendly interface for AI that adapts to your workflow.',
             'start_url': '/',
             'display': 'standalone',
             'background_color': '#343541',
@@ -2973,15 +2979,15 @@ async def get_manifest_json():
                 # Do not alter, remove, obscure, or replace it except as LICENSE permits:
                 # https://docs.openwebui.com/license.
                 {
-                    'src': '/static/logo.png',
-                    'type': 'image/png',
-                    'sizes': '500x500',
+                    'src': branding['logo_url'] if custom_logo else '/static/logo.png',
+                    **({} if custom_logo else {'type': 'image/png'}),
+                    'sizes': 'any' if custom_logo else '500x500',
                     'purpose': 'any',
                 },
                 {
-                    'src': '/static/logo.png',
-                    'type': 'image/png',
-                    'sizes': '500x500',
+                    'src': branding['logo_url'] if custom_logo else '/static/logo.png',
+                    **({} if custom_logo else {'type': 'image/png'}),
+                    'sizes': 'any' if custom_logo else '500x500',
                     'purpose': 'maskable',
                 },
             ],
@@ -2996,17 +3002,23 @@ async def get_manifest_json():
 @app.get('/opensearch.xml')
 async def get_opensearch_xml():
     webui_url = await Config.get('webui.url')
+    branding = await get_site_branding(app.state.WEBUI_NAME)
+    name = escape(branding['name'])
+    logo_url = branding['logo_url']
+    if logo_url.startswith('/'):
+        logo_url = f'{webui_url.rstrip("/")}{logo_url}'
+    search_url = quoteattr(f'{webui_url.rstrip("/")}/?q={{searchTerms}}')
     # LICENSE covers this Open WebUI search identifier.
     # Do not alter, remove, obscure, or replace it except as LICENSE permits:
     # https://docs.openwebui.com/license.
     xml_content = rf"""
     <OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/" xmlns:moz="http://www.mozilla.org/2006/browser/search/">
-    <ShortName>{app.state.WEBUI_NAME}</ShortName>
-    <Description>Search {app.state.WEBUI_NAME}</Description>
+    <ShortName>{name}</ShortName>
+    <Description>Search {name}</Description>
     <InputEncoding>UTF-8</InputEncoding>
-    <Image width="16" height="16" type="image/x-icon">{webui_url}/static/favicon.png</Image>
-    <Url type="text/html" method="get" template="{webui_url}/?q={'{searchTerms}'}"/>
-    <moz:SearchForm>{webui_url}</moz:SearchForm>
+    <Image>{escape(logo_url)}</Image>
+    <Url type="text/html" method="get" template={search_url}/>
+    <moz:SearchForm>{escape(webui_url)}</moz:SearchForm>
     </OpenSearchDescription>
     """
     return Response(content=xml_content, media_type='application/xml')
@@ -3096,6 +3108,33 @@ mimetypes.add_type('text/javascript', '.mjs')
 mimetypes.add_type('application/wasm', '.wasm')
 # Python before 3.13 only knows .webp from /etc/mime.types, which the Docker image does not ship
 mimetypes.add_type('image/webp', '.webp')
+
+
+@app.api_route('/static/favicon.png', methods=['GET', 'HEAD'], include_in_schema=False)
+@app.api_route('/static/favicon-96x96.png', methods=['GET', 'HEAD'], include_in_schema=False)
+@app.api_route('/static/favicon.svg', methods=['GET', 'HEAD'], include_in_schema=False)
+@app.api_route('/static/favicon.ico', methods=['GET', 'HEAD'], include_in_schema=False)
+@app.api_route('/static/apple-touch-icon.png', methods=['GET', 'HEAD'], include_in_schema=False)
+@app.api_route('/static/logo.png', methods=['GET', 'HEAD'], include_in_schema=False)
+@app.api_route('/static/splash.png', methods=['GET', 'HEAD'], include_in_schema=False)
+@app.api_route('/static/splash-dark.png', methods=['GET', 'HEAD'], include_in_schema=False)
+async def get_site_branding_asset(request: Request):
+    branding = await get_site_branding(app.state.WEBUI_NAME)
+    headers = {'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff'}
+    logo_url = URL(branding['logo_url'])
+    is_local_asset = logo_url.netloc == request.url.netloc and logo_url.path in {
+        '/static/favicon.png', '/static/favicon-96x96.png', '/static/favicon.svg',
+        '/static/favicon.ico', '/static/apple-touch-icon.png', '/static/logo.png',
+        '/static/splash.png', '/static/splash-dark.png',
+    }
+    if branding['logo_url'] != DEFAULT_LOGO_URL and not is_local_asset:
+        return RedirectResponse(branding['logo_url'], headers=headers)
+    filename = request.url.path.rsplit('/', 1)[-1]
+    file_path = os.path.join(STATIC_DIR, filename)
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail='File not found')
+    return FileResponse(file_path, headers=headers)
+
 
 # Serve build-time static assets (CSS, JS, images, favicon, etc.)
 app.mount('/static', StaticFiles(directory=STATIC_DIR), name='static')

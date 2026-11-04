@@ -4,7 +4,7 @@ import {
 	type ControlId,
 	type Visibility
 } from '$lib/utils/ui-visibility';
-import { APP_NAME } from '$lib/constants';
+import { APP_NAME, WEBUI_BASE_URL } from '$lib/constants';
 import { type Writable, derived, get, writable } from 'svelte/store';
 import type { CommentTarget } from '$lib/apis/comments';
 import type { ModelConfig } from '$lib/apis';
@@ -22,6 +22,10 @@ export const WEBUI_VERSION = writable(null);
 export const WEBUI_DEPLOYMENT_ID = writable(null);
 
 export const config: Writable<Config | undefined> = writable(undefined);
+export const WEBUI_LOGO = derived(config, ($config) => {
+	const url = $config?.logo_url || '/static/favicon.png';
+	return url.startsWith('/') ? `${WEBUI_BASE_URL}${url}` : url;
+});
 export const user: Writable<SessionUser | undefined> = writable(undefined);
 
 // Electron App
@@ -304,7 +308,7 @@ type Settings = {
 	scrollOnBranchChange?: boolean;
 	scrollOnResponseGeneration?: boolean;
 	showFilesOnTerminalSelect?: boolean;
-	terminalFileDisplay?: 'sidebar' | 'inline';
+	terminalFileDisplay?: 'attachment' | 'sidebar' | 'inline';
 	directConnections?: null;
 	chatBubble?: boolean;
 	copyFormatted?: boolean;
@@ -381,6 +385,7 @@ type Config = {
 	license_metadata: any;
 	status: boolean;
 	name: string;
+	logo_url?: string;
 	version: string;
 	default_locale: string;
 	i18n?: I18nOverrides;

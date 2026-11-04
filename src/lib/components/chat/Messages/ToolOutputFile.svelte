@@ -24,6 +24,7 @@
 	export let item: any;
 	export let chatId = '';
 	export let localBlob: Blob | null = null;
+	export let attachment = false;
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
@@ -33,6 +34,9 @@
 	let error = '';
 	let objectUrls: string[] = [];
 	let destroyed = false;
+	let previewGeneration = 0;
+	let observedPreviewKey = '';
+	let expansionKey = '';
 
 	let fileImageUrl: string | null = null;
 	let fileVideoUrl: string | null = null;
@@ -55,6 +59,7 @@
 	const SQLITE_EXTS = new Set(['db', 'sqlite', 'sqlite3', 'db3']);
 	const OFFICE_EXTS = new Set(['docx', 'xlsx', 'xls', 'pptx']);
 
+	$: effectiveChatId = chatId || String(item?.session_id ?? '');
 	$: fileId =
 		item?.source === 'open_webui'
 			? (String(item.path ?? '').match(/^\/api\/v1\/files\/([^/]+)\/content$/)?.[1] ?? '')
@@ -66,11 +71,11 @@
 	$: selector = item?.terminal_selector;
 	$: terminal = resolveTerminal(selector, $terminalServers ?? [], $settings);
 	$: unavailable = !terminal && !fileId && !localBlob;
-	$: previewKey = localBlob ? `local:${path}:${chatId}` : fileId || (terminal ? `${terminal.url}|${terminal.key}|${path}|${chatId}` : '');
+	$: previewKey = localBlob ? `local:${path}:${effectiveChatId}` : fileId || (terminal ? `${terminal.url}|${terminal.key}|${path}|${effectiveChatId}` : '');
 	$: isPerChatTerminal = ($terminalServers ?? []).some((server: any) => server.id === selector);
 	$: previewBaseUrl =
-		terminal && isPerChatTerminal && chatId
-			? `${terminal.url}/chats/${encodeURIComponent(chatId)}`
+		terminal && isPerChatTerminal && effectiveChatId
+			? `${terminal.url}/chats/${encodeURIComponent(effectiveChatId)}`
 			: (terminal?.url ?? '');
 	$: previewClass = isImage(path)
 		? 'h-[22rem]'
@@ -82,6 +87,20 @@
 			  getExt(path) === 'svg'
 			? 'h-96'
 			: 'h-72';
+	$: nextExpansionKey = JSON.stringify([effectiveChatId, item?.source, selector, path, attachment, item?.display_mode]);
+	$: if (nextExpansionKey !== expansionKey) {
+		expansionKey = nextExpansionKey;
+		expanded = !attachment || isImage(path) || item?.display_mode === 'inline' ||
+			(item?.display_mode == null && item?.displayed === true);
+	}
+	$: if (previewKey !== observedPreviewKey) {
+		observedPreviewKey = previewKey;
+		previewGeneration += 1;
+		loading = false;
+		loadedKey = '';
+		error = '';
+		clearPreview();
+	}
 	$: if (expanded && !unavailable && path && previewKey !== loadedKey && !loading) {
 		void loadPreview(previewKey);
 	}
@@ -134,27 +153,32 @@
 	}
 
 	async function blobForPreview() {
-		if (localBlob) return { blob: localBlob, filename: name };
+		const filename = name;
+		const contentType = item?.content_type ?? item?.mime_type ?? '';
+		if (localBlob) return { blob: localBlob, filename };
 		if (fileId) {
 			const data = await getFileContentById(fileId).catch(() => null);
-			return data
-				? { blob: new Blob([data], { type: item?.content_type ?? '' }), filename: name }
-				: null;
+			return data ? { blob: new Blob([data], { type: contentType }), filename } : null;
 		}
 		if (!terminal) return null;
-		return downloadFileBlob(terminal.url, terminal.key, path, chatId || undefined);
+		return downloadFileBlob(terminal.url, terminal.key, path, effectiveChatId || undefined);
 	}
 
-	async function loadExcelSheet(sheet: string) {
-		if (!excelWorkbook) return;
+	async function loadExcelSheet(sheet: string, generation = previewGeneration) {
+		const workbook = excelWorkbook;
+		if (!workbook) return;
 		selectedExcelSheet = sheet;
+		const current = () => !destroyed && generation === previewGeneration && workbook === excelWorkbook && sheet === selectedExcelSheet;
 		const { excelToTable } = await import('$lib/utils/excelToTable');
-		const result = await excelToTable(excelWorkbook.Sheets[selectedExcelSheet]);
+		if (!current()) return;
+		const result = await excelToTable(workbook.Sheets[sheet]);
 		const DOMPurify = (await import('dompurify')).default;
-		fileOfficeHtml = DOMPurify.sanitize(result.html);
+		if (current()) fileOfficeHtml = DOMPurify.sanitize(result.html);
 	}
 
 	async function loadPreview(key: string) {
+		const generation = ++previewGeneration;
+		const current = () => !destroyed && generation === previewGeneration && key === previewKey;
 		loadedKey = key;
 		loading = true;
 		error = '';
@@ -163,79 +187,73 @@
 		try {
 			if (isImage(path) || isVideo(path) || isAudio(path)) {
 				const result = await blobForPreview();
+				if (!current()) return;
 				if (!result) throw new Error(t('Preview failed'));
 				const url = URL.createObjectURL(result.blob);
 				objectUrls = [...objectUrls, url];
 				if (isImage(path)) fileImageUrl = url;
 				else if (isVideo(path)) fileVideoUrl = url;
 				else fileAudioUrl = url;
-			} else if (['glb', 'gltf', 'stl', 'obj', 'ply'].includes(getExt(path))) {
+			} else if (['glb', 'gltf', 'stl', 'obj', 'ply'].includes(getExt(path)) || isPdf(path) || isSqlite(path)) {
 				const result = await blobForPreview();
+				if (!current()) return;
 				if (!result) throw new Error(t('Preview failed'));
-				fileModelData = await result.blob.arrayBuffer();
-			} else if (isPdf(path) || isSqlite(path) || isOffice(path)) {
+				const buffer = await result.blob.arrayBuffer();
+				if (!current()) return;
+				if (isPdf(path)) filePdfData = buffer;
+				else if (isSqlite(path)) fileSqliteData = buffer;
+				else fileModelData = buffer;
+			} else if (isOffice(path)) {
 				const ext = getExt(path);
-
-				if (isPdf(path)) {
-					const result = await blobForPreview();
-					if (!result) throw new Error(t('Preview failed'));
-					const arrayBuffer = await result.blob.arrayBuffer();
-					filePdfData = arrayBuffer;
-				} else if (isSqlite(path)) {
-					const result = await blobForPreview();
-					if (!result) throw new Error(t('Preview failed'));
-					const arrayBuffer = await result.blob.arrayBuffer();
-					fileSqliteData = arrayBuffer;
-				} else if (ext === 'docx') {
+				if (ext === 'docx' || ext === 'pptx') {
 					const preview = terminal
-						? await downloadFilePreview(terminal.url, terminal.key, path, chatId || undefined)
+						? await downloadFilePreview(terminal.url, terminal.key, path, effectiveChatId || undefined)
 						: null;
+					if (!current()) return;
 					if (preview) {
-						filePdfData = await preview.blob.arrayBuffer();
+						const buffer = await preview.blob.arrayBuffer();
+						if (current()) filePdfData = buffer;
 					} else {
 						const result = await blobForPreview();
+						if (!current()) return;
 						if (!result) throw new Error(t('Preview failed'));
-						fileDocxData = await result.blob.arrayBuffer();
+						const buffer = await result.blob.arrayBuffer();
+						if (!current()) return;
+						if (ext === 'docx') fileDocxData = buffer;
+						else {
+							const { pptxToImages } = await import('$lib/utils/pptxToHtml');
+							if (!current()) return;
+							const resultImages = await pptxToImages(buffer);
+							if (current()) fileOfficeSlides = resultImages.images;
+						}
 					}
-				} else if (ext === 'xlsx' || ext === 'xls') {
+				} else {
 					const result = await blobForPreview();
+					if (!current()) return;
 					if (!result) throw new Error(t('Preview failed'));
-					const arrayBuffer = await result.blob.arrayBuffer();
+					const buffer = await result.blob.arrayBuffer();
 					const XLSX = await import('xlsx');
-					excelWorkbook = XLSX.read(new Uint8Array(arrayBuffer), { type: 'array' });
+					if (!current()) return;
+					excelWorkbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
 					excelSheetNames = excelWorkbook.SheetNames;
-					if (excelSheetNames.length > 0) {
-						await loadExcelSheet(excelSheetNames[0]);
-					}
-				} else if (ext === 'pptx') {
-					const preview = terminal
-						? await downloadFilePreview(terminal.url, terminal.key, path, chatId || undefined)
-						: null;
-					if (preview) {
-						filePdfData = await preview.blob.arrayBuffer();
-					} else {
-						const result = await blobForPreview();
-						if (!result) throw new Error(t('Preview failed'));
-						const arrayBuffer = await result.blob.arrayBuffer();
-						const { pptxToImages } = await import('$lib/utils/pptxToHtml');
-						const resultImages = await pptxToImages(arrayBuffer);
-						fileOfficeSlides = resultImages.images;
-					}
+					if (excelSheetNames.length) await loadExcelSheet(excelSheetNames[0], generation);
 				}
 			} else if (fileId || localBlob) {
 				const result = await blobForPreview();
+				if (!current()) return;
 				if (!result) throw new Error(t('Preview failed'));
 				if (/^(?:text\/|application\/(?:json|xml|javascript))/.test(result.blob.type) || /\.(?:txt|log|md|markdown|csv|tsv|json|html?|svg|xml|ya?ml|py|js|ts|css|sh|sql|ipynb)$/i.test(path)) {
-					fileContent = await result.blob.text();
+					const content = await result.blob.text();
+					if (current()) fileContent = content;
 				}
-			} else if (terminal) {
-				fileContent = await readFile(terminal.url, terminal.key, path, chatId || undefined);
+			} else if (terminal && (!attachment || /^(?:text\/|application\/(?:json|xml|javascript))/.test(item?.content_type ?? item?.mime_type ?? '') || /\.(?:txt|log|md|markdown|csv|tsv|json|html?|svg|xml|ya?ml|py|js|ts|css|sh|sql|ipynb)$/i.test(path))) {
+				const content = await readFile(terminal.url, terminal.key, path, effectiveChatId || undefined);
+				if (current()) fileContent = content;
 			}
 		} catch (e) {
-			error = e instanceof Error ? e.message : t('Preview failed');
+			if (current()) error = e instanceof Error ? e.message : t('Preview failed');
 		} finally {
-			loading = false;
-			if (destroyed) clearPreview();
+			if (current()) loading = false;
 		}
 	}
 
@@ -261,7 +279,7 @@
 		URL.revokeObjectURL(url);
 	}
 
-	onDestroy(() => { destroyed = true; clearPreview(); });
+	onDestroy(() => { destroyed = true; previewGeneration += 1; clearPreview(); });
 </script>
 
 <div
@@ -275,6 +293,7 @@
 			class="flex h-full min-w-0 flex-1 items-center gap-2 px-2.5 text-left"
 			on:click={() => (expanded = !expanded)}
 			aria-expanded={expanded}
+			title={name}
 		>
 			<div
 				class="flex size-5 shrink-0 items-center justify-center text-gray-500 dark:text-gray-400"
@@ -292,6 +311,7 @@
 			disabled={unavailable}
 			on:click|stopPropagation={downloadFile}
 			aria-label={t('Download')}
+			title={t('Download')}
 		>
 			<Icon name="download" size={13} />
 		</button>
@@ -302,6 +322,7 @@
 				disabled={unavailable}
 				on:click|stopPropagation={openInFiles}
 				aria-label={t('Open')}
+				title={t('Open')}
 			>
 				<Icon name="external-link" size={13} />
 			</button>
@@ -314,7 +335,10 @@
 				{t('Terminal unavailable')}
 			</div>
 		{:else if error}
-			<div class="px-4 py-3 text-xs text-red-500 dark:text-red-400">{error}</div>
+			<div class="flex items-center justify-between gap-3 px-4 py-3 text-xs text-red-500 dark:text-red-400">
+				<span>{error}</span>
+				<button type="button" class="shrink-0 underline" on:click={() => (loadedKey = '')}>{t('Retry')}</button>
+			</div>
 		{:else}
 			<div
 				class="{previewClass} max-h-[75vh] min-h-24 resize-y overflow-hidden bg-gray-50 dark:bg-gray-950"
@@ -331,7 +355,7 @@
 					{fileDocxData}
 					{fileContent}
 					baseUrl={fileId ? '' : previewBaseUrl}
-					{chatId}
+					chatId={effectiveChatId}
 					apiKey={terminal?.key ?? ''}
 					{fileOfficeHtml}
 					{fileOfficeSlides}
@@ -339,7 +363,7 @@
 					{targetPage}
 					{excelSheetNames}
 					{selectedExcelSheet}
-					onSheetChange={loadExcelSheet}
+					onSheetChange={(sheet) => loadExcelSheet(sheet)}
 					readOnly={true}
 				/>
 				{#if !loading && fileImageUrl === null && fileVideoUrl === null && fileAudioUrl === null && filePdfData === null && fileSqliteData === null && fileModelData === null && fileDocxData === null && fileContent === null && fileOfficeHtml === null && fileOfficeSlides === null}

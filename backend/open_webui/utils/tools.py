@@ -1617,6 +1617,11 @@ async def get_terminal_tools(
         directory_hint = f'Current session working directory: {json.dumps(terminal_cwd, ensure_ascii=False)}. ' + directory_hint
     tool_names = {spec['name'] for spec in specs}
     guidance = [directory_hint]
+    if 'display_file' in tool_names:
+        guidance.append(
+            'Deliver generated files with display_file so they appear as attachments in the reply; images preview automatically. '
+            'After attachment succeeds, do not repeat the file path as code or speculate about client rendering.'
+        )
     if 'write_file' in tool_names:
         guidance.append('Prefer write_file for text-file creation; it handles paths and quoting directly.')
     if 'replace_file_content' in tool_names:

@@ -55,3 +55,16 @@ export function fileContentType(path: string): string {
 	};
 	return types[path.split('.').pop()?.toLowerCase() ?? ''] ?? 'application/octet-stream';
 }
+
+export function isChatFileAttachment(value: any): boolean {
+	return value?.type === 'file' && typeof value.path === 'string' && !!value.path &&
+		value.exists !== false && !value.error &&
+		(value.source === 'open_webui' || (value.source === 'open_terminal' && !!value.terminal_selector));
+}
+
+export function chatFileAttachmentKey(item: any): string {
+	return JSON.stringify([
+		item.source, item.terminal_selector ?? '', item.session_id ?? '',
+		item.full_path || item.path, item.page ?? null
+	]);
+}

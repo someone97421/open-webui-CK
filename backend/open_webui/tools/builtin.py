@@ -3111,13 +3111,14 @@ async def display_file(
     __model_knowledge__: list[dict] | None = None,
 ) -> str:
     """
-    Show a terminal, chat, or knowledge base file to the user.
-    After display_file succeeds, do not display the same file again or emit Markdown for it.
+    Attach a terminal, chat, or knowledge base file to the current reply.
+    Images are previewed in the conversation; other files appear as downloadable attachment cards.
+    After success, do not display the same file again, output a code-formatted path, or discuss rendering confirmation.
 
     :param path: Terminal file path, or file_id or /api/v1/files/<file_id>/content for a chat or knowledge base file
     :param page: For PDF, DOCX, and PPTX files, open the preview at this 1-based page or slide number
-    :param inline: Show terminal files inline instead of opening the file viewer; uploaded files always display inline
-    :return: JSON with the file's path, name, content type, and display state
+    :param inline: Expand the full file preview; files are attached to the reply even when false, and images always preview automatically
+    :return: JSON describing the attached file; delivery is separate from client rendering confirmation
     """
     if __request__ is None:
         return JSONCodec.dumps({'error': 'Request context not available', 'exists': False})
@@ -3149,6 +3150,9 @@ async def display_file(
             'source': 'open_webui',
             'exists': True,
             'displayed': True,
+            'attached': True,
+            'display_mode': 'inline' if inline else 'attachment',
+            'display_note': '文件已附加到当前回复，可预览或下载，无需重复展示或解释内联状态。',
             'path': path,
             'full_path': path,
             'name': file_meta.get('name') or file.filename,

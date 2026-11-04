@@ -22,6 +22,7 @@
 		settings,
 		theme,
 		WEBUI_NAME,
+		WEBUI_LOGO,
 		WEBUI_VERSION,
 		WEBUI_DEPLOYMENT_ID,
 		mobile,
@@ -63,6 +64,7 @@
 	import { getAllTags } from '$lib/apis/chats';
 	import { chatCompletion } from '$lib/apis/openai';
 	import { isTemporaryChatId } from '$lib/utils/chatId';
+	import { fileContentType } from '$lib/utils/chatFiles';
 	import {
 		addOpenAIConnection,
 		removeOpenAIConnection,
@@ -113,6 +115,7 @@
 	});
 
 	setContext('i18n', i18n);
+	$: if ($config?.name) WEBUI_NAME.set($config.name);
 	/** @type {import('$lib/components/auth/MfaManagement.svelte').MfaManagementFlow | null} */
 	let mfaManagement = null;
 	setContext(
@@ -419,13 +422,16 @@
 				.filter(Boolean)
 				.at(-1) ??
 			'file';
-		const contentType = result?.content_type ?? result?.mime_type ?? 'application/octet-stream';
+		const contentType = result?.content_type ?? result?.mime_type ?? fileContentType(name);
 
 		return {
 			...(result ?? {}),
 			type: 'file',
 			source: 'open_terminal',
 			displayed: true,
+			attached: true,
+			display_mode: params?.inline === true ? 'inline' : 'attachment',
+			display_note: '文件已附加到当前回复，图片自动预览，其他文件可展开或下载。无需重复展示或解释内联状态。',
 			terminal_selector: serverUrl,
 			terminal_url: serverUrl,
 			session_id: chatId,
@@ -470,16 +476,16 @@
 
 			console.log('executeToolServer', res);
 			const result = Array.isArray(res) ? res[0] : res;
-			const inlineDisplayFile =
-				data?.name === 'display_file' && params?.path && params?.inline === true;
+			const displayFile = data?.name === 'display_file' && params?.path &&
+				result?.exists === true && !result?.error && isDirectTerminalServer(toolServer.url);
 			const output =
-				inlineDisplayFile && result?.exists !== false
+				displayFile
 					? Array.isArray(res)
 						? [terminalFileResult(result, params, toolServer.url, chatId)]
 						: terminalFileResult(result, params, toolServer.url, chatId)
 					: res;
 
-			if (data?.name === 'display_file' && params?.path && !inlineDisplayFile && !chatId) {
+			if (displayFile && params?.inline !== true && !chatId && $settings?.terminalFileDisplay === 'sidebar') {
 				if (result?.exists !== false) {
 					displayFileHandler(
 						result?.path ?? params.path,
@@ -560,7 +566,7 @@
 						// LICENSE covers this Open WebUI notification identifier.
 						// Do not alter, remove, obscure, or replace it except as LICENSE permits:
 						// https://docs.openwebui.com/license.
-						icon: `${WEBUI_BASE_URL}/static/favicon.png`
+						icon: $WEBUI_LOGO
 					});
 				}
 			}
@@ -722,7 +728,7 @@
 								// LICENSE covers this Open WebUI notification identifier.
 								// Do not alter, remove, obscure, or replace it except as LICENSE permits:
 								// https://docs.openwebui.com/license.
-								icon: `${WEBUI_BASE_URL}/static/favicon.png`
+								icon: $WEBUI_LOGO
 							});
 						}
 					}
@@ -1399,7 +1405,7 @@
 	Do not alter, remove, obscure, or replace it except as LICENSE permits:
 	https://docs.openwebui.com/license. -->
 	<title>{$WEBUI_NAME}</title>
-	<link crossorigin="anonymous" rel="icon" href="{WEBUI_BASE_URL}/static/favicon.png" />
+	<link rel="icon" href={$WEBUI_LOGO} />
 
 	<meta name="apple-mobile-web-app-title" content={$WEBUI_NAME} />
 	<meta name="description" content={$WEBUI_NAME} />

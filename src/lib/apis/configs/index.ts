@@ -850,3 +850,32 @@ export const setBanners = async (token: string, banners: Banner[]) => {
 
 	return res;
 };
+
+export type InterfaceBranding = { name: string; logo_url: string };
+
+async function interfaceBrandingRequest<T>(token: string, path = '', options: RequestInit = {}): Promise<T> {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/interface/branding${path}`, {
+		...options,
+		headers: { Authorization: `Bearer ${token}`, ...options.headers }
+	});
+	if (!res.ok) {
+		const data = await res.json().catch(() => ({}));
+		throw data.detail ?? `HTTP ${res.status}`;
+	}
+	const data = await res.json();
+	return data;
+}
+
+export const getInterfaceBranding = (token: string) =>
+	interfaceBrandingRequest<InterfaceBranding>(token);
+
+export const setInterfaceBranding = (token: string, value: InterfaceBranding) =>
+	interfaceBrandingRequest<InterfaceBranding>(token, '', {
+		method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value)
+	});
+
+export const uploadInterfaceLogo = (token: string, file: File, signal?: AbortSignal) => {
+	const body = new FormData();
+	body.append('file', file);
+	return interfaceBrandingRequest<{ url: string }>(token, '/logo', { method: 'POST', body, signal });
+};

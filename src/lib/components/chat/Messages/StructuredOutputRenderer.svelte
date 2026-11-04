@@ -201,9 +201,9 @@
 			</div>
 		</ConsecutiveDetailsGroup>
 	{:else if displayItem.type === 'file'}
-		{#if displayItem.item?.displayed || $settings?.terminalFileDisplay === 'inline'}
-			<ToolOutputFile item={displayItem.item} {chatId} />
-		{/if}
+		{#key JSON.stringify([chatId, displayItem.id, displayItem.item])}
+			<ToolOutputFile item={displayItem.item} {chatId} attachment={$settings?.terminalFileDisplay !== 'inline'} />
+		{/key}
 	{:else if displayItem.type === 'context_compaction'}
 		<ContextCompactionLabel summary={displayItem.summary} {compactPreview} />
 	{:else}

@@ -57,7 +57,7 @@
 	let scrollOnBranchChange = true;
 	let scrollOnResponseGeneration = true;
 	let showFilesOnTerminalSelect = true;
-	let terminalFileDisplay: 'sidebar' | 'inline' = 'sidebar';
+	let terminalFileDisplay: 'attachment' | 'sidebar' | 'inline' = 'attachment';
 	let userLocation = false;
 
 	// Interface
@@ -382,7 +382,8 @@
 		scrollOnBranchChange = currentSettings?.scrollOnBranchChange ?? true;
 		scrollOnResponseGeneration = currentSettings?.scrollOnResponseGeneration ?? true;
 		showFilesOnTerminalSelect = currentSettings?.showFilesOnTerminalSelect ?? true;
-		terminalFileDisplay = currentSettings?.terminalFileDisplay === 'inline' ? 'inline' : 'sidebar';
+		terminalFileDisplay = currentSettings?.terminalFileDisplay === 'sidebar' ? 'sidebar' :
+			currentSettings?.terminalFileDisplay === 'inline' ? 'inline' : 'attachment';
 
 		temporaryChatByDefault = currentSettings?.temporaryChatByDefault ?? false;
 		chatDirection = currentSettings?.chatDirection ?? 'auto';
@@ -1529,19 +1530,17 @@
 					aria-labelledby="terminal-file-display-label terminal-file-display-state"
 					class={actionButtonClass}
 					on:click={() => {
-						terminalFileDisplay = terminalFileDisplay === 'inline' ? 'sidebar' : 'inline';
+						terminalFileDisplay = terminalFileDisplay === 'attachment' ? 'sidebar' : terminalFileDisplay === 'sidebar' ? 'inline' : 'attachment';
 						saveSettings({ terminalFileDisplay });
 					}}
 					type="button"
+					title={$i18n.t('settings.personal.interface.terminalFileDisplay.description')}
 				>
 					<span id="terminal-file-display-state">
-						{terminalFileDisplay === 'inline' ? $i18n.t('Inline') : $i18n.t('Sidebar')}
+						{terminalFileDisplay === 'attachment' ? $i18n.t('settings.personal.interface.terminalFileDisplay.attachment') : terminalFileDisplay === 'inline' ? $i18n.t('Inline') : $i18n.t('Sidebar')}
 					</span>
 				</button>
 			</div>
-			<p class={settingDescriptionClass}>
-				{$i18n.t('settings.personal.interface.terminalFileDisplay.description')}
-			</p>
 		</div>
 
 		<div>

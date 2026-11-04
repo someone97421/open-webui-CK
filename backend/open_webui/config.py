@@ -2927,6 +2927,8 @@ ENABLE_LDAP_GROUP_CREATION = os.getenv('ENABLE_LDAP_GROUP_CREATION', 'False').lo
 LDAP_ATTRIBUTE_FOR_GROUPS = os.getenv('LDAP_ATTRIBUTE_FOR_GROUPS', 'memberOf')
 
 DEFAULT_CONFIG = {
+    'ui.custom_name': '',
+    'ui.custom_logo_url': '',
     'skills.lazy_loading.enable': ENABLE_SKILL_LAZY_LOADING,
     'skills.content_max_chars': SKILL_CONTENT_MAX_CHARS,
     'skills.preview_max_chars': SKILL_PREVIEW_MAX_CHARS,

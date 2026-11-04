@@ -1,6 +1,7 @@
 <script>
 	import { getContext } from 'svelte';
 	import { WEBUI_NAME } from '$lib/stores';
+	import SiteLogo from '$lib/components/common/SiteLogo.svelte';
 	const i18n = getContext('i18n');
 
 	export let show = true;
@@ -44,13 +45,7 @@
 			<!-- LICENSE covers this Open WebUI onboarding logo.
 			Do not alter, remove, obscure, or replace it except as LICENSE permits:
 			https://docs.openwebui.com/license. -->
-			<img
-				id="logo"
-				crossorigin="anonymous"
-				src="/static/favicon.png"
-				class="size-6 rounded-full"
-				alt="{$WEBUI_NAME} logo"
-			/>
+			<SiteLogo id="logo" className="size-6 rounded-full" alt="{$WEBUI_NAME} logo" />
 		</div>
 
 		<video
@@ -76,7 +71,7 @@
 					Do not alter, remove, obscure, or replace it except as LICENSE permits:
 					https://docs.openwebui.com/license. -->
 					<div class="mb-4 text-[0.6875rem] font-medium tracking-[0.18em] uppercase opacity-35">
-						Open WebUI
+						{$WEBUI_NAME}
 					</div>
 
 					<h1

@@ -328,6 +328,8 @@ def build_terminal_file_tool_result(
         terminal_id = tool_id.split(':', 1)[1]
 
     server_url = ((tool or {}).get('server') or {}).get('url')
+    if (tool or {}).get('direct'):
+        terminal_id = None
     terminal_selector = terminal_id or server_url
     path = tool_result.get('path') or tool_function_params.get('path')
     if not terminal_selector or not path:
@@ -341,9 +343,10 @@ def build_terminal_file_tool_result(
         'type': 'file',
         'source': 'open_terminal',
         'exists': True,
-        'displayed': tool_function_params.get('inline') is True,
-        'display_mode': 'inline' if tool_function_params.get('inline') is True else 'viewer',
-        'display_note': 'displayed 仅表示正文内联模式；侧栏预览使用独立事件，该字段不是客户端渲染确认。',
+        'displayed': True,
+        'attached': True,
+        'display_mode': 'inline' if tool_function_params.get('inline') is True else 'attachment',
+        'display_note': '文件已附加到当前回复：图片自动预览，其他文件可展开或下载。无需重复展示、输出代码路径或解释内联状态；此回执不代表客户端已完成渲染。',
         'terminal_selector': terminal_selector,
         **({'terminal_id': terminal_id} if terminal_id else {}),
         **({'terminal_url': server_url} if server_url and not terminal_id else {}),
@@ -980,12 +983,16 @@ async def terminal_event_handler(
         if tool_function_params.get('inline') is True:
             return
         result = parse_terminal_tool_result(tool_result)
+        if result.get('source') == 'open_webui':
+            return
         # Open Terminal resolves the argument against the session cwd, so prefer its resolved path
         path = result.get('path') or tool_function_params.get('path', '')
         if not path:
             return
-        # Only open the viewer for existing files that are not displayed inline.
-        if result.get('exists') is not True or result.get('error') or result.get('displayed') is True:
+        # Attached files may also open in the viewer when the user explicitly chooses sidebar mode.
+        if result.get('exists') is not True or result.get('error') or (
+            result.get('displayed') is True and result.get('attached') is not True
+        ):
             return
         page = tool_function_params.get('page')
 
@@ -1153,6 +1160,12 @@ async def chat_completion_tools_handler(
                 except Exception as e:
                     tool_result = {'error': str(e)}
 
+                terminal_file_result = build_terminal_file_tool_result(
+                    tool_function_name, tool_function_params, tool_result, tools.get(tool_function_name), metadata
+                )
+                if terminal_file_result:
+                    tool_result = terminal_file_result
+
                 tool_result, tool_result_files, tool_result_embeds = await process_tool_result(
                     request,
                     tool_function_name,
@@ -1162,6 +1175,16 @@ async def chat_completion_tools_handler(
                     metadata,
                     user,
                 )
+
+                file_result = parse_terminal_tool_result(tool_result)
+                if (
+                    tool_function_name == 'display_file'
+                    and file_result.get('type') == 'file'
+                    and file_result.get('source') in ('open_terminal', 'open_webui')
+                    and file_result.get('exists') is True
+                    and not file_result.get('error')
+                ):
+                    tool_result_files.append(file_result)
 
                 if event_emitter:
                     await terminal_event_handler(
@@ -1424,6 +1447,8 @@ def get_images_from_messages(message_list):
     for message in reversed(message_list):
         message_images = []
         for file in message.get('files', []):
+            if not file.get('url'):
+                continue
             if file.get('type') == 'image':
                 message_images.append(file.get('url'))
             elif is_raster_image_content_type(file.get('content_type')):

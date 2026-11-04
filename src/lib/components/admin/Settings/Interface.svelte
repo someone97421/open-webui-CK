@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getModels, getTaskConfig, updateTaskConfig } from '$lib/apis';
+	import { getBackendConfig, getModels, getTaskConfig, updateTaskConfig } from '$lib/apis';
 	import { getChatConfig, updateChatConfig } from '$lib/apis/chats';
 	import { onMount, getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -15,10 +15,11 @@
 	import AdminSettingField from './AdminSettingField.svelte';
 	import AdminSettingRow from './AdminSettingRow.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
-	import { config as appConfig } from '$lib/stores';
-	import { setInterfaceVisibility } from '$lib/apis/configs';
+	import { config as appConfig, WEBUI_NAME } from '$lib/stores';
+	import { getInterfaceBranding, setInterfaceBranding, setInterfaceVisibility, type InterfaceBranding } from '$lib/apis/configs';
 	import type { Visibility } from '$lib/utils/ui-visibility';
 	import VisibilitySettings from './Interface/Visibility.svelte';
+	import BrandingSettings from './Interface/Branding.svelte';
 
 	export let saveHandler: () => void;
 
@@ -62,6 +63,9 @@
 	let toolSearchAlwaysLoaded = '';
 	let showTaskParameters = false;
 	let visibility: Visibility = { ...($appConfig?.ui?.visibility ?? {}) };
+	let branding: InterfaceBranding = { name: '', logo_url: '' };
+	let logoUploading = false;
+	let saving = false;
 
 	const configuredParams = (params: Record<string, any> = {}) =>
 		Object.fromEntries(
@@ -71,13 +75,15 @@
 		);
 
 	const updateInterfaceHandler = async () => {
+		if (saving || logoUploading) return;
+		saving = true;
 		const taskConfigPayload = {
 			...taskConfig,
 			TASK_MODEL_PARAMS: configuredParams(taskConfig.TASK_MODEL_PARAMS)
 		};
 
 		try {
-			[taskConfig, chatConfig, visibility] = await Promise.all([
+			[taskConfig, chatConfig, visibility, branding] = await Promise.all([
 				updateTaskConfig(localStorage.token, taskConfigPayload),
 				updateChatConfig(localStorage.token, {
 					...chatConfig,
@@ -86,32 +92,22 @@
 						.map((item) => item.trim())
 						.filter((item) => item !== '')
 				}),
-				setInterfaceVisibility(localStorage.token, visibility)
+				setInterfaceVisibility(localStorage.token, visibility),
+				setInterfaceBranding(localStorage.token, branding)
 			]);
+			const backendConfig = await getBackendConfig();
+			if (!backendConfig) throw new Error($i18n.t('Failed to load settings'));
+			appConfig.set(backendConfig);
+			WEBUI_NAME.set(backendConfig.name);
 		} catch (error) {
 			toast.error(
 				Array.isArray(error) ? error.map((entry) => entry.msg).join('\n') : String(error)
 			);
 			return;
+		} finally {
+			saving = false;
 		}
 		toolSearchAlwaysLoaded = (chatConfig.TOOL_SEARCH_ALWAYS_LOADED ?? []).join(', ');
-		appConfig.update((current) =>
-			current
-				? {
-						...current,
-						ui: { ...current.ui, visibility },
-						features: {
-							...current.features,
-							enable_context_compaction: chatConfig.ENABLE_CONTEXT_COMPACTION,
-							enable_tool_permissions: chatConfig.ENABLE_TOOL_PERMISSIONS,
-							enable_title_generation: taskConfig.ENABLE_TITLE_GENERATION,
-							enable_follow_up_generation: taskConfig.ENABLE_FOLLOW_UP_GENERATION,
-							enable_tags_generation: taskConfig.ENABLE_TAGS_GENERATION,
-							enable_autocomplete_generation: taskConfig.ENABLE_AUTOCOMPLETE_GENERATION
-						}
-					}
-				: current
-		);
 		saveHandler();
 	};
 
@@ -148,9 +144,10 @@
 
 	const init = async () => {
 		try {
-			[taskConfig, chatConfig] = await Promise.all([
+			[taskConfig, chatConfig, branding] = await Promise.all([
 				getTaskConfig(localStorage.token),
-				getChatConfig(localStorage.token)
+				getChatConfig(localStorage.token),
+				getInterfaceBranding(localStorage.token)
 			]);
 			taskConfig.TASK_MODEL_PARAMS = taskConfig.TASK_MODEL_PARAMS ?? {};
 			toolSearchAlwaysLoaded = (chatConfig.TOOL_SEARCH_ALWAYS_LOADED ?? []).join(', ');
@@ -203,6 +200,7 @@
 		</h2>
 
 		<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
+			<BrandingSettings bind:value={branding} bind:uploading={logoUploading} disabled={saving} />
 			<VisibilitySettings bind:visibility />
 			<AdminSettingSection title={$i18n.t('settings.admin.interface.sections.tasks.title')}>
 				<div>
@@ -670,7 +668,9 @@
 			<button
 				class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
 				type="submit"
+				disabled={saving || logoUploading}
 			>
+				{#if saving}<Spinner className="size-3.5" />{/if}
 				{$i18n.t('Save')}
 			</button>
 		</div>

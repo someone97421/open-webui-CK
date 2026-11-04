@@ -1,4 +1,5 @@
 import { encode } from 'html-entities';
+import { chatFileAttachmentKey, isChatFileAttachment } from '$lib/utils/chatFiles';
 
 export type OutputContentPart = {
 	type?: string;
@@ -186,16 +187,7 @@ function getInlineFileFromToolOutput(callItem?: OutputItem, resultItem?: OutputI
 	}
 
 	const result = parseJSONStringValue(getToolResultText(resultItem)) as Record<string, unknown>;
-	const isTerminalFile = result?.source === 'open_terminal' && !!result.terminal_selector;
-	const isOpenWebUIFile = result?.source === 'open_webui';
-	if (
-		!result ||
-		typeof result !== 'object' ||
-		result.type !== 'file' ||
-		!result.path ||
-		result.exists === false ||
-		!(isTerminalFile || isOpenWebUIFile)
-	) {
+	if (!isChatFileAttachment(result)) {
 		return null;
 	}
 
@@ -360,6 +352,7 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 	const currentDetailTokens: OutputDetailToken[] = [];
 	const toolOutputByCallId: Record<string, OutputItem> = {};
 	const toolCallByCallId: Record<string, OutputItem> = {};
+	const fileDisplayIndexes = new Map<string, number>();
 
 	for (const item of output) {
 		if (item?.type === 'function_call_output' && item.call_id) {
@@ -394,12 +387,20 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 		if (item.type === 'function_call_output') {
 			const inlineFile = getInlineFileFromToolOutput(toolCallByCallId[item.call_id ?? ''], item);
 			if (inlineFile) {
-				flushDetails();
-				displayItems.push({
+				const fileKey = chatFileAttachmentKey(inlineFile);
+				const existingIndex = fileDisplayIndexes.get(fileKey);
+				const fileItem: OutputDisplayItem = {
 					type: 'file',
 					id: item.id ?? `file-${index}`,
 					item: inlineFile
-				});
+				};
+				if (existingIndex !== undefined) {
+					displayItems[existingIndex] = fileItem;
+				} else {
+					flushDetails();
+					fileDisplayIndexes.set(fileKey, displayItems.length);
+					displayItems.push(fileItem);
+				}
 			}
 			return;
 		}

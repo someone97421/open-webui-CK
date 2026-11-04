@@ -1294,7 +1294,7 @@
 		}
 		if (type === 'terminal:display_file') {
 			if (!data?.path) return;
-			if ($settings?.terminalFileDisplay === 'inline') return;
+			if ($settings?.terminalFileDisplay !== 'sidebar') return;
 			displayFileHandler(data.path, { showTabs, showFileNavPath }, { page: data?.page });
 		} else if (type === 'terminal:write_file' || type === 'terminal:replace_file_content') {
 			if (!data?.path) return;
@@ -1648,7 +1648,7 @@
 				} else if (type === 'chat:message:voice') {
 					message.meta = { ...message.meta, voice: data.voice };
 				} else if (type === 'chat:message:files' || type === 'files') {
-					message.files = isTemporaryChatId(event.chat_id)
+					message.files = type === 'files' || isTemporaryChatId(event.chat_id)
 						? [...(message.files ?? []), ...data.files]
 						: data.files;
 				} else if (type === 'chat:message:tasks') {

@@ -70,7 +70,7 @@
 	import { createNewNote, getPinnedNoteList, toggleNotePinnedStatusById } from '$lib/apis/notes';
 	import { updateUserSettings } from '$lib/apis/users';
 	import { createNoteHandler } from '$lib/components/notes/utils';
-	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import {
 		getAccessibleProjectTerminals,
 		isArchivedProject,
@@ -92,6 +92,7 @@
 	import UserMenu from './Sidebar/UserMenu.svelte';
 	import ChatItem from './Sidebar/ChatItem.svelte';
 	import Spinner from '../common/Spinner.svelte';
+	import SiteLogo from '../common/SiteLogo.svelte';
 	import Loader from '../common/Loader.svelte';
 	import Folder from '../common/Folder.svelte';
 	import SidebarSection from './Sidebar/Section.svelte';
@@ -1215,11 +1216,7 @@
 								<!-- LICENSE covers this Open WebUI sidebar logo.
 							Do not alter, remove, obscure, or replace it except as LICENSE permits:
 							https://docs.openwebui.com/license. -->
-								<img
-									src="{WEBUI_BASE_URL}/static/favicon.png"
-									class="sidebar-new-chat-icon size-5 rounded-full group-hover:hidden"
-									alt=""
-								/>
+								<SiteLogo className="sidebar-new-chat-icon size-5 rounded-full group-hover:hidden" />
 
 								<Sidebar className="size-4 hidden group-hover:flex" />
 								<InboxBadge className="-top-0.5 -translate-x-0.5 text-[0.5625rem]" />
@@ -1403,12 +1400,7 @@
 						<!-- LICENSE covers this Open WebUI sidebar logo.
 					Do not alter, remove, obscure, or replace it except as LICENSE permits:
 					https://docs.openwebui.com/license. -->
-						<img
-							crossorigin="anonymous"
-							src="{WEBUI_BASE_URL}/static/favicon.png"
-							class="sidebar-new-chat-icon size-5 rounded-full"
-							alt=""
-						/>
+						<SiteLogo className="sidebar-new-chat-icon size-5 rounded-full" />
 					</a>
 
 					<a href="/" class="flex min-w-0 flex-1 px-0.5" on:click={newChatHandler}>

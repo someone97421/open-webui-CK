@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { WEBUI_BASE_URL } from '$lib/constants';
+	import SiteLogo from '$lib/components/common/SiteLogo.svelte';
 	import { settings, playingNotificationSound, isLastActiveTab } from '$lib/stores';
 	import DOMPurify from 'dompurify';
 	import { marked } from 'marked';
@@ -115,7 +115,7 @@
 		<!-- LICENSE covers this Open WebUI notification logo.
 		Do not alter, remove, obscure, or replace it except as LICENSE permits:
 		https://docs.openwebui.com/license. -->
-		<img src="{WEBUI_BASE_URL}/static/favicon.png" alt="" class="size-6 rounded-full" />
+		<SiteLogo className="size-6 rounded-full" />
 	</div>
 
 	<div>

@@ -27,6 +27,7 @@
 	import { generateInitialsImage, canvasPixelTest, getUserTimezone } from '$lib/utils';
 
 	import Spinner from '$lib/components/common/Spinner.svelte';
+	import SiteLogo from '$lib/components/common/SiteLogo.svelte';
 	import OnBoarding from '$lib/components/OnBoarding.svelte';
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
 	import { redirect } from '@sveltejs/kit';
@@ -300,13 +301,7 @@
 									<!-- LICENSE covers this Open WebUI sign-in logo.
 									Do not alter, remove, obscure, or replace it except as LICENSE permits:
 									https://docs.openwebui.com/license. -->
-									<img
-										id="logo"
-										crossorigin="anonymous"
-										src="{WEBUI_BASE_URL}/static/favicon.png"
-										class="size-24 rounded-full"
-										alt="{$WEBUI_NAME} logo"
-									/>
+									<SiteLogo id="logo" className="size-24 rounded-full" alt="{$WEBUI_NAME} logo" />
 								</div>
 							{/if}
 							<form
@@ -683,13 +678,7 @@
 						<!-- LICENSE covers this Open WebUI sign-in logo.
 						Do not alter, remove, obscure, or replace it except as LICENSE permits:
 						https://docs.openwebui.com/license. -->
-						<img
-							id="logo"
-							crossorigin="anonymous"
-							src="{WEBUI_BASE_URL}/static/favicon.png"
-							class=" w-6 rounded-full"
-							alt=""
-						/>
+						<SiteLogo id="logo" className="w-6 rounded-full" />
 					</div>
 				</div>
 			</div>
