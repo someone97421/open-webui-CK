@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getContext, createEventDispatcher, onMount, tick } from 'svelte';
+	import { getContext, onDestroy, tick } from 'svelte';
 	import type { Writable } from 'svelte/store';
 	import type { i18n as I18n } from 'i18next';
 
@@ -10,15 +10,12 @@
 	import XMark from '../icons/XMark.svelte';
 
 	import { toast } from 'svelte-sonner';
-	import { page } from '$app/stores';
-	import { goto } from '$app/navigation';
 	import { user, config, models, terminalServers } from '$lib/stores';
 	import ModelSelector from '$lib/components/chat/ModelSelector/Selector.svelte';
-
+	import ProjectAgentsEditor from '$lib/components/chat/Placeholder/ProjectAgentsEditor.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
 	import { getFolderById } from '$lib/apis/folders';
-	import { getProjectAgents, updateProjectAgents } from '$lib/apis/terminal';
 	import {
 		getAccessibleProjectTerminals,
 		getFolderProject,
@@ -28,17 +25,14 @@
 
 	export let show = false;
 	export let onSubmit: Function = (e) => {};
-
-	export let folderId = null;
+	export let folderId: string | null = null;
 	export let parentId = null;
 	export let edit = false;
 	export let project = false;
 
 	let folder = null;
 	let name = '';
-	let meta = {
-		background_image_url: null
-	};
+	let meta = { background_image_url: null };
 	let data: Record<string, any> = {
 		description: '',
 		model_ids: [] as string[],
@@ -50,133 +44,111 @@
 	let initializing = false;
 	let showAccessModal = false;
 	let projectTerminalId = '';
-	let agentsContent = '';
-	let agentsSavedContent = '';
-	let agentsLoading = false;
-	let agentsLoadError = '';
-	let agentsRequestSequence = 0;
+	let agentsExpanded = false;
+	let agentsOpened = false;
+	let agentsEditor: ProjectAgentsEditor | undefined;
+	let agentsSaving = false;
+	let agentsSaveBlocked = false;
+	let modalSequence = 0;
 
 	$: projectMode = project || isProjectFolder(folder);
+	$: projectArchived = projectMode && (getFolderProject(folder)?.archived ?? false);
+	$: agentsTerminalChanged = projectMode && !!folder && projectTerminalId !== getFolderProject(folder)?.terminal_id;
 	$: projectTerminals = getAccessibleProjectTerminals($terminalServers ?? []);
-	$: agentsTooLarge = new TextEncoder().encode(agentsContent).length > 32 * 1024;
-	$: if (show && projectMode && !projectTerminalId && projectTerminals.length > 0) {
+	$: if (show && projectMode && !projectArchived && !projectTerminalId && projectTerminals.length > 0) {
 		projectTerminalId = projectTerminals[0].id;
 	}
 
-	const loadAgents = async (id: string) => {
-		const sequence = ++agentsRequestSequence;
-		agentsLoading = true;
-		agentsLoadError = '';
-		try {
-			const result = await getProjectAgents(localStorage.token, id);
-			if (sequence !== agentsRequestSequence || folderId !== id) return;
-			agentsContent = result.content;
-			agentsSavedContent = result.content;
-		} catch (error) {
-			if (sequence !== agentsRequestSequence || folderId !== id) return;
-			agentsLoadError = error instanceof Error ? error.message : String(error);
-			toast.error(`AGENTS.md 加载失败：${agentsLoadError}`);
-		} finally {
-			if (sequence === agentsRequestSequence) agentsLoading = false;
-		}
-	};
+	const isCurrent = (sequence: number, id: string | null) =>
+		show && sequence === modalSequence && folderId === id;
 
 	const submitHandler = async () => {
-		if (initializing) return;
-		loading = true;
-
+		if (initializing || loading || agentsSaving || projectArchived || (folderId && !folder)) return;
 		if ((data?.files ?? []).some((file) => file.status === 'uploading')) {
 			toast.error($i18n.t('Please wait until all files are uploaded.'));
-			loading = false;
 			return;
 		}
-
 		const maxFileCount = $config?.features?.folder_max_file_count ?? '';
 		if (maxFileCount && (data?.files ?? []).length > maxFileCount) {
-			toast.error(
-				$i18n.t('Maximum number of files per folder is {{max}}.', { max: maxFileCount ?? 0 })
-			);
-			loading = false;
+			toast.error($i18n.t('Maximum number of files per folder is {{max}}.', { max: maxFileCount ?? 0 }));
 			return;
 		}
-
 		if (projectMode && !projectTerminalId) {
 			toast.error('请选择项目 Terminal');
-			loading = false;
 			return;
 		}
-		if (projectMode && edit && (agentsLoading || agentsTooLarge)) {
-			toast.error(agentsTooLarge ? 'AGENTS.md 不能超过 32 KiB' : '请等待 AGENTS.md 加载完成');
-			loading = false;
+		if (agentsSaveBlocked && !agentsTerminalChanged) {
+			toast.error('AGENTS.md 不能超过 32 KiB');
 			return;
 		}
 
-		const result = await onSubmit({
-			name,
-			meta,
-			data: {
-				...data,
-				description: data.description.trim(),
-				model_ids: data.model_ids,
-				system_prompt: data.system_prompt,
-				files: data.files,
-				...(projectMode
-					? {
-							project: {
-								version: 1,
-								terminal_id: projectTerminalId,
-								archived: getFolderProject(folder)?.archived ?? false
+		const sequence = modalSequence;
+		const id = folderId;
+		const editor = agentsTerminalChanged ? undefined : agentsEditor;
+		loading = true;
+		try {
+			const result = await onSubmit({
+				name,
+				meta,
+				data: {
+					...data,
+					description: data.description.trim(),
+					model_ids: data.model_ids,
+					system_prompt: data.system_prompt,
+					files: data.files,
+					...(projectMode
+						? {
+								project: {
+									version: 1,
+									terminal_id: projectTerminalId,
+									archived: getFolderProject(folder)?.archived ?? false
+								}
 							}
-						}
-					: {})
-			},
-			parent_id: edit ? undefined : parentId
-		});
-		if (result === null || result === false) {
-			loading = false;
-			return;
-		}
-
-		if (projectMode && edit && agentsContent !== agentsSavedContent) {
-			try {
-				const saved = await updateProjectAgents(localStorage.token, folderId, agentsContent);
-				agentsContent = saved.content;
-				agentsSavedContent = saved.content;
-				toast.success('AGENTS.md 已保存');
-			} catch (error) {
-				toast.error(
-					`项目设置已保存，但 AGENTS.md 保存失败：${error instanceof Error ? error.message : String(error)}`
-				);
-				loading = false;
+						: {})
+				},
+				parent_id: edit ? undefined : parentId
+			});
+			if (!isCurrent(sequence, id) || result === null || result === false) return;
+			if (editor && !(await editor.save())) {
+				if (isCurrent(sequence, id)) toast.error('项目设置已保存，AGENTS.md 未保存');
 				return;
 			}
+			if (isCurrent(sequence, id)) show = false;
+		} catch (error) {
+			if (isCurrent(sequence, id)) toast.error(`${error}`);
+		} finally {
+			if (sequence === modalSequence) loading = false;
 		}
-
-		show = false;
-		loading = false;
 	};
 
-	const init = async () => {
-		initializing = true;
+	const init = async (isOpen: boolean, id: string | null) => {
+		const sequence = ++modalSequence;
+		initializing = isOpen;
+		loading = false;
+		showAccessModal = false;
 		folder = null;
+		name = '';
+		meta = { background_image_url: null };
+		data = { description: '', model_ids: [], system_prompt: '', files: [] };
 		projectTerminalId = '';
-		agentsContent = '';
-		agentsSavedContent = '';
-		agentsLoadError = '';
-		if (folderId) {
-			folder = await getFolderById(localStorage.token, folderId).catch((error) => {
-				toast.error(`${error}`);
+		agentsExpanded = false;
+		agentsOpened = false;
+		agentsSaving = false;
+		agentsSaveBlocked = false;
+		if (!isOpen) return;
+		if (id) {
+			const loaded = await getFolderById(localStorage.token, id).catch((error) => {
+				if (isCurrent(sequence, id)) toast.error(`${error}`);
 				return null;
 			});
-			if (!folder) {
+			if (!isCurrent(sequence, id)) return;
+			if (!loaded) {
 				initializing = false;
 				return;
 			}
-
+			folder = loaded;
 			name = folder.name;
-			meta = folder.meta || {
-				background_image_url: null
-			};
+			meta = folder.meta || { background_image_url: null };
 			data = {
 				system_prompt: '',
 				files: [],
@@ -185,45 +157,22 @@
 				model_ids: folder.data?.model_ids ?? []
 			};
 			projectTerminalId = getFolderProject(folder)?.terminal_id ?? '';
-			if (project || isProjectFolder(folder)) void loadAgents(folder.id);
 		} else {
 			projectTerminalId = projectTerminals[0]?.id ?? '';
 		}
-
-		focusInput();
 		initializing = false;
-	};
-
-	const focusInput = async () => {
 		await tick();
+		if (!isCurrent(sequence, id)) return;
 		const input = document.getElementById('folder-name') as HTMLInputElement;
-		if (input) {
-			input.focus();
-			input.select();
-		}
+		input?.focus();
+		input?.select();
 	};
 
-	$: if (show) {
-		init();
-	}
-	$: if (!show) showAccessModal = false;
+	$: void init(show, folderId);
 
-	$: if (!show && !edit) {
-		name = '';
-		meta = {
-			background_image_url: null
-		};
-		data = {
-			description: '',
-			model_ids: [],
-			system_prompt: '',
-			files: []
-		};
-		projectTerminalId = '';
-		agentsContent = '';
-		agentsSavedContent = '';
-		agentsLoadError = '';
-	}
+	onDestroy(() => {
+		modalSequence += 1;
+	});
 </script>
 
 <Modal
@@ -264,6 +213,7 @@
 						bind:value={name}
 						placeholder={projectMode ? '输入项目名称' : $i18n.t('Enter folder name')}
 						autocomplete="off"
+						disabled={loading || initializing || projectArchived}
 					/>
 				</div>
 
@@ -278,6 +228,7 @@
 						placeholder={$i18n.t('Enter description')}
 						maxSize={200}
 						bind:value={data.description}
+						disabled={loading || initializing || projectArchived}
 					/>
 				</div>
 
@@ -288,7 +239,7 @@
 							id="project-terminal"
 							class="h-8 w-full rounded-lg border border-gray-100 bg-transparent px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-gray-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-800 dark:focus-visible:ring-gray-700"
 							bind:value={projectTerminalId}
-							disabled={loading || projectTerminals.length === 0}
+							disabled={loading || initializing || agentsSaving || projectArchived || projectTerminals.length === 0}
 							required
 							title="项目会话固定使用此 Terminal"
 						>
@@ -302,38 +253,40 @@
 						</select>
 					</div>
 
-					{#if edit}
+					{#if edit && folder && !initializing}
 						<div class="my-2">
-							<div class="mb-1 flex items-center justify-between gap-2">
-								<label for="project-agents" class="block text-xs text-gray-500" title="项目工作区中的 AGENTS.md">
-									AGENTS.md
-								</label>
-								{#if agentsContent !== agentsSavedContent && !agentsLoading && !agentsLoadError}
-									<span class="text-[0.6875rem] text-gray-400" role="status">未保存</span>
+							<button
+								type="button"
+								class="flex w-full items-center justify-between rounded-lg py-1 text-xs text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"
+								aria-expanded={agentsExpanded}
+								aria-controls="project-advanced-settings"
+								disabled={agentsTerminalChanged}
+								title={agentsTerminalChanged ? '请先保存 Terminal 绑定，再编辑 AGENTS.md；旧连接的草稿不会写入新连接' : '编辑项目 AGENTS.md'}
+								on:click={() => {
+									agentsExpanded = !agentsExpanded;
+									agentsOpened = true;
+								}}
+							>
+								<span>高级设置</span>
+								<span aria-hidden="true">{agentsExpanded ? '−' : '+'}</span>
+							</button>
+							<div id="project-advanced-settings" hidden={!agentsExpanded} class="mt-2">
+								{#if agentsTerminalChanged}
+									<div class="mb-2 text-xs text-gray-500" title="旧连接的 AGENTS.md 草稿不会写入新连接">请先保存 Terminal 绑定</div>
 								{/if}
+								<div hidden={agentsTerminalChanged}>
+									{#if show && agentsOpened}
+										<ProjectAgentsEditor
+											bind:this={agentsEditor}
+											projectId={folder.id}
+											readOnly={projectArchived || agentsTerminalChanged}
+											disabled={loading}
+											bind:saving={agentsSaving}
+											bind:saveBlocked={agentsSaveBlocked}
+										/>
+									{/if}
+								</div>
 							</div>
-							{#if agentsLoading}
-								<div class="flex min-h-48 items-center justify-center rounded-lg border border-gray-100 dark:border-gray-800">
-									<Spinner className="size-4" />
-								</div>
-							{:else if agentsLoadError}
-								<div class="flex min-h-48 flex-col items-center justify-center gap-2 rounded-lg border border-gray-100 dark:border-gray-800" role="alert">
-									<span class="text-xs text-gray-500">AGENTS.md 加载失败</span>
-									<button type="button" class="rounded-lg px-2 py-1 text-xs hover:bg-gray-100 dark:hover:bg-gray-850" on:click={() => loadAgents(folderId)}>
-										重试
-									</button>
-								</div>
-							{:else}
-								<textarea
-									id="project-agents"
-									class="block min-h-48 w-full resize-y rounded-lg border border-gray-100 bg-transparent px-2.5 py-2 font-mono text-xs leading-5 outline-none placeholder:text-gray-300 focus-visible:ring-2 focus-visible:ring-gray-300 dark:border-gray-800 dark:placeholder:text-gray-700 dark:focus-visible:ring-gray-700"
-									bind:value={agentsContent}
-									placeholder="输入项目指令…"
-									spellcheck="false"
-									disabled={loading || getFolderProject(folder)?.archived}
-									title={getFolderProject(folder)?.archived ? '恢复项目后可编辑 AGENTS.md' : agentsTooLarge ? 'AGENTS.md 不能超过 32 KiB' : 'AGENTS.md'}
-								></textarea>
-							{/if}
 						</div>
 					{/if}
 				{:else}
@@ -433,8 +386,8 @@
 					<button
 						class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
 						type="submit"
-						disabled={loading || initializing || (projectMode && (!projectTerminalId || agentsLoading || agentsTooLarge))}
-						title={projectMode && agentsTooLarge ? 'AGENTS.md 不能超过 32 KiB' : projectMode && !projectTerminalId ? '请选择项目 Terminal' : '保存'}
+						disabled={loading || initializing || agentsSaving || (agentsSaveBlocked && !agentsTerminalChanged) || projectArchived || (!!folderId && !folder) || (projectMode && !projectTerminalId)}
+						title={projectArchived ? '恢复项目后可编辑设置' : agentsSaveBlocked && !agentsTerminalChanged ? 'AGENTS.md 不能超过 32 KiB' : projectMode && !projectTerminalId ? '请选择项目 Terminal' : '保存'}
 					>
 						{projectMode && !edit ? '创建项目' : $i18n.t('Save')}
 						{#if loading}<Spinner className="size-3" />{/if}

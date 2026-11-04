@@ -18,6 +18,8 @@
 		selectedTerminalId
 	} from '$lib/stores';
 	import {
+		terminalRequest,
+		type TerminalFileList,
 		getCwd,
 		getFileMatches,
 		listFiles,
@@ -1066,19 +1068,33 @@
 		savedPath = directory;
 		pushNavHistory(directory);
 
-		const result = await listFiles(terminal.url, terminal.key, directory, chatId ?? undefined);
-		if (generation !== loadGeneration || selector !== effectiveTerminalId || session !== chatId)
+		let result: TerminalFileList | null = null;
+		let failure = '目录加载失败，请检查 Terminal 连接';
+		try {
+			result = await terminalRequest<TerminalFileList>(
+				{
+					selector: selector ?? '',
+					baseUrl: terminal.url.replace(/\/$/, ''),
+					key: terminal.key,
+					system: ($terminalServers ?? []).some((server) => server.id === selector)
+				},
+				session,
+				`/files/list?directory=${encodeURIComponent(directory)}`
+			);
+			if (!Array.isArray(result?.entries)) throw new Error('Terminal 返回了无效的文件列表');
+		} catch (cause) {
+			result = null;
+			if (cause instanceof Error) failure = cause.message;
+		}
+		if (disposed || generation !== loadGeneration || selector !== effectiveTerminalId || session !== chatId)
 			return;
 		loading = false;
 
-		// Set working directory on the terminal server (fire-and-forget)
-		if (!initialFile) setCwd(terminal.url, terminal.key, directory, chatId ?? undefined);
-
 		if (result === null) {
-			error =
-				'Failed to load directory. Check your Terminal connection in Settings → Integrations.';
+			error = failure;
 			entries = [];
 		} else {
+			if (!initialFile) void setCwd(terminal.url, terminal.key, directory, session ?? undefined);
 			currentWritable = result.writable !== false;
 			entries = normalizeEntries(result.entries);
 			treeCache = new Map(treeCache).set(directory, entries);
@@ -2621,7 +2637,13 @@
 				{:else if loading || (effectiveTerminalId && $terminalServers === null)}
 					<div class="flex justify-center pt-8"><Spinner className="size-4" /></div>
 				{:else if error}
-					<div class="p-4 text-xs">{error}</div>
+					<div class="p-4 text-xs">
+						<Tooltip content={error}>
+							<button type="button" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300" on:click={() => void loadDir(currentPath)}>
+								目录加载失败，点击重试
+							</button>
+						</Tooltip>
+					</div>
 				{:else if visibleEntries.length === 0 && !creatingFolder && !creatingFile}
 					<div class="flex items-center justify-center py-12">
 						<div class="text-xs text-gray-400 dark:text-gray-500">

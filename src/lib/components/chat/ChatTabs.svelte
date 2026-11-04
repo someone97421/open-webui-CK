@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { v4 as uuidv4 } from 'uuid';
 	import type { TerminalContext } from '$lib/types';
 	import type { GitStatus } from '$lib/apis/terminal/git';
 	let gitStatus: GitStatus | null = null;
@@ -311,7 +312,7 @@
 		let number = 1;
 		while (tabs.tabs.some((tab) => tab.untitled && tab.label === `Untitled-${number}`)) number++;
 		openPanel({
-			id: crypto.randomUUID(),
+			id: uuidv4(),
 			kind: 'file',
 			label: `Untitled-${number}`,
 			terminalId: selectedConnection.selector,
@@ -328,7 +329,7 @@
 			const initialPrompt = pending?.parentId === chatId ? pending.prompt : '';
 			if (pending?.parentId === chatId) sideChatRequest.set(null);
 			openPanel({
-				id: crypto.randomUUID(),
+				id: uuidv4(),
 				kind,
 				label: `${view.label} ${++sideChatNumber}`,
 				initialPrompt
@@ -346,7 +347,7 @@
 			terminalNumber++;
 		}
 		openPanel({
-			id: crypto.randomUUID(),
+			id: uuidv4(),
 			kind: 'terminal',
 			label: `${$i18n.t('Terminal')} ${terminalNumber}`,
 			terminalNumber,
@@ -398,7 +399,7 @@
 				? `${connection.baseUrl}/chats/${encodeURIComponent(chatId)}`
 				: connection?.baseUrl);
 		openPanel({
-			id: crypto.randomUUID(),
+			id: uuidv4(),
 			kind: 'browser',
 			label: port ? `localhost:${port}` : $i18n.t('Browser'),
 			path: url,

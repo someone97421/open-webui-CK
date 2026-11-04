@@ -1,4 +1,5 @@
 import { get } from 'svelte/store';
+import { v4 as uuidv4 } from 'uuid';
 
 import { chatId, config, pyodideWorker, user } from '$lib/stores';
 import { isTemporaryChatId } from '$lib/utils/chatId';
@@ -35,7 +36,7 @@ export function getPyodideScope(targetChatId?: string | null): PyodideScope {
 	if (!visibleChatId && previousChatId) draftId = null;
 	previousChatId = visibleChatId;
 	const currentChatId = targetChatId || visibleChatId;
-	if (!draftId) draftId = `draft-${crypto.randomUUID()}`;
+	if (!draftId) draftId = `draft-${uuidv4()}`;
 	const scopedChatId = currentChatId || draftId;
 	return {
 		userId,

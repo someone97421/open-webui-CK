@@ -307,6 +307,27 @@ async def _project_agents_context(request, user, project_id):
     return connection, headers, cookies
 
 
+async def _project_terminal_error(response, message):
+    detail = None
+    body = bytearray()
+    while len(body) <= 8192:
+        chunk = await response.content.read(8193 - len(body))
+        if not chunk:
+            break
+        body.extend(chunk)
+    if len(body) <= 8192:
+        try:
+            data = json.loads(body)
+            if isinstance(data, dict) and isinstance(data.get('detail'), str):
+                detail = data['detail'].strip()[:1000]
+        except ValueError:
+            pass
+    raise HTTPException(
+        status_code=503 if response.status in (502, 503, 504) else 502,
+        detail=f'{message}：{detail}' if detail else message,
+    )
+
+
 async def _project_agents_request(request, user, project_id, content=None):
     from open_webui.env import AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL
     from open_webui.utils.terminals import MAX_AGENTS_MD_BYTES
@@ -317,22 +338,22 @@ async def _project_agents_request(request, user, project_id, content=None):
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), trust_env=True) as session:
             async with session.get(f'{base}/files/cwd', headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL, allow_redirects=False) as response:
                 if response.status != 200:
-                    raise HTTPException(status_code=502, detail='无法打开项目工作区')
+                    await _project_terminal_error(response, '无法打开项目工作区')
                 cwd = await response.json()
-            home = cwd.get('home')
+            home = cwd.get('home') if isinstance(cwd, dict) else None
             if not isinstance(home, str) or not posixpath.isabs(home):
                 raise HTTPException(status_code=502, detail='项目工作区路径无效')
             path = posixpath.join(home, 'AGENTS.md')
             if content is not None:
                 async with session.post(f'{base}/files/write', json={'path': path, 'content': content}, headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL, allow_redirects=False) as response:
                     if response.status != 200:
-                        raise HTTPException(status_code=502, detail='保存项目 AGENTS.md 失败')
-                return {'content': content}
+                        await _project_terminal_error(response, '保存项目 AGENTS.md 失败')
+                return {'content': content, 'exists': True}
             async with session.get(f'{base}/files/read', params={'path': path}, headers=headers, cookies=cookies, ssl=AIOHTTP_CLIENT_SESSION_TOOL_SERVER_SSL, allow_redirects=False) as response:
                 if response.status == 404:
-                    return {'content': ''}
+                    return {'content': '', 'exists': False}
                 if response.status != 200:
-                    raise HTTPException(status_code=502, detail='读取项目 AGENTS.md 失败')
+                    await _project_terminal_error(response, '读取项目 AGENTS.md 失败')
                 chunks = bytearray()
                 async for chunk in response.content.iter_chunked(8192):
                     chunks.extend(chunk)
@@ -344,9 +365,11 @@ async def _project_agents_request(request, user, project_id, content=None):
                     raise HTTPException(status_code=502, detail='项目 AGENTS.md 内容无效')
                 if len(text.encode('utf-8')) > MAX_AGENTS_MD_BYTES:
                     raise HTTPException(status_code=413, detail='AGENTS.md 超过 32 KiB')
-                return {'content': text}
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail='项目 Terminal 暂时不可用') from exc
+                return {'content': text, 'exists': True}
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail='项目 Terminal 暂时不可用') from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail='项目 Terminal 返回了无效内容') from exc
 
 
 @router.get('/projects/{project_id}/agents')

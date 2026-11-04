@@ -1609,105 +1609,6 @@
 						</SidebarSection>
 					{/if}
 
-					{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
-					<SidebarSection
-						id="sidebar-projects"
-						bind:open={showProjects}
-						name="项目"
-						onAdd={projectTerminalOptions.length > 0 ? () => (showCreateProjectModal = true) : null}
-						onAddLabel="新建项目"
-					>
-						<Folders
-							bind:folderRegistry
-							folders={activeProjectFolders}
-							{shiftKey}
-							onFolderUnreadCounts={applyFolderUnreadCounts}
-							onDelete={(folderId) => {
-								if ($selectedFolder?.id === folderId) selectedFolder.set(null);
-								initChatList();
-							}}
-							on:update={() => initChatList()}
-							on:import={(e) => importChatHandler(e.detail.items, false, e.detail.folderId)}
-							on:change={() => initChatList()}
-						/>
-						{#if Object.keys(archivedProjectFolders).length > 0}
-							<SidebarSection
-								id="sidebar-archived-projects"
-								bind:open={showArchivedProjects}
-								name={`已归档项目 (${Object.keys(archivedProjectFolders).length})`}
-								dragAndDrop={false}
-							>
-								<Folders
-									bind:folderRegistry
-									folders={archivedProjectFolders}
-									{shiftKey}
-									onFolderUnreadCounts={applyFolderUnreadCounts}
-									onDelete={(folderId) => {
-										if ($selectedFolder?.id === folderId) selectedFolder.set(null);
-										initChatList();
-									}}
-									on:update={() => initChatList()}
-									on:import={(e) => importChatHandler(e.detail.items, false, e.detail.folderId)}
-									on:change={() => initChatList()}
-								/>
-							</SidebarSection>
-						{/if}
-					</SidebarSection>
-
-						<SidebarSection
-							id="sidebar-folders"
-							bind:open={showFolders}
-							name={$i18n.t('Folders')}
-							onAdd={() => {
-								showCreateFolderModal = true;
-							}}
-							onAddLabel={$i18n.t('New Folder')}
-							on:drop={async (e) => {
-								const { type, id, item } = e.detail;
-
-								if (type === 'folder') {
-									if (folders[id].parent_id === null) {
-										return;
-									}
-
-									const res = await updateFolderParentIdById(localStorage.token, id, null).catch(
-										(error) => {
-											toast.error(`${error}`);
-											return null;
-										}
-									);
-
-									if (res) {
-										await initFolders();
-									}
-								}
-							}}
-						>
-							<Folders
-								bind:folderRegistry
-							folders={legacyFolders}
-								{shiftKey}
-								onFolderUnreadCounts={applyFolderUnreadCounts}
-								onDelete={(folderId) => {
-									let id = $selectedFolder?.id;
-									while (id && id !== folderId) id = folders[id]?.parent_id;
-									if (id) selectedFolder.set(null);
-									initChatList();
-								}}
-								on:update={() => {
-									initChatList();
-								}}
-								on:import={(e) => {
-									const { folderId, items } = e.detail;
-									importChatHandler(items, false, folderId);
-								}}
-								on:change={async () => {
-									initChatList();
-								}}
-							/>
-						</SidebarSection>
-					{/if}
-
 					<SidebarSection
 						id="sidebar-chats"
 					name="会话"
@@ -2019,6 +1920,105 @@
 							</div>
 						</div>
 					</SidebarSection>
+
+					{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
+						<SidebarSection
+							id="sidebar-folders"
+							bind:open={showFolders}
+							name={$i18n.t('Folders')}
+							onAdd={() => {
+								showCreateFolderModal = true;
+							}}
+							onAddLabel={$i18n.t('New Folder')}
+							on:drop={async (e) => {
+								const { type, id, item } = e.detail;
+
+								if (type === 'folder') {
+									if (folders[id].parent_id === null) {
+										return;
+									}
+
+									const res = await updateFolderParentIdById(localStorage.token, id, null).catch(
+										(error) => {
+											toast.error(`${error}`);
+											return null;
+										}
+									);
+
+									if (res) {
+										await initFolders();
+									}
+								}
+							}}
+						>
+							<Folders
+								bind:folderRegistry
+								folders={legacyFolders}
+								{shiftKey}
+								onFolderUnreadCounts={applyFolderUnreadCounts}
+								onDelete={(folderId) => {
+									let id = $selectedFolder?.id;
+									while (id && id !== folderId) id = folders[id]?.parent_id;
+									if (id) selectedFolder.set(null);
+									initChatList();
+								}}
+								on:update={() => {
+									initChatList();
+								}}
+								on:import={(e) => {
+									const { folderId, items } = e.detail;
+									importChatHandler(items, false, folderId);
+								}}
+								on:change={async () => {
+									initChatList();
+								}}
+							/>
+						</SidebarSection>
+
+						<SidebarSection
+							id="sidebar-projects"
+							bind:open={showProjects}
+							name="项目"
+							onAdd={projectTerminalOptions.length > 0 ? () => (showCreateProjectModal = true) : null}
+							onAddLabel="新建项目"
+						>
+							<Folders
+								bind:folderRegistry
+								folders={activeProjectFolders}
+								{shiftKey}
+								onFolderUnreadCounts={applyFolderUnreadCounts}
+								onDelete={(folderId) => {
+									if ($selectedFolder?.id === folderId) selectedFolder.set(null);
+									initChatList();
+								}}
+								on:update={() => initChatList()}
+								on:import={(e) => importChatHandler(e.detail.items, false, e.detail.folderId)}
+								on:change={() => initChatList()}
+							/>
+							{#if Object.keys(archivedProjectFolders).length > 0}
+								<SidebarSection
+									id="sidebar-archived-projects"
+									bind:open={showArchivedProjects}
+									name={`已归档项目 (${Object.keys(archivedProjectFolders).length})`}
+									dragAndDrop={false}
+								>
+									<Folders
+										bind:folderRegistry
+										folders={archivedProjectFolders}
+										{shiftKey}
+										onFolderUnreadCounts={applyFolderUnreadCounts}
+										onDelete={(folderId) => {
+											if ($selectedFolder?.id === folderId) selectedFolder.set(null);
+											initChatList();
+										}}
+										on:update={() => initChatList()}
+										on:import={(e) => importChatHandler(e.detail.items, false, e.detail.folderId)}
+										on:change={() => initChatList()}
+									/>
+								</SidebarSection>
+							{/if}
+						</SidebarSection>
+					{/if}
 				</div>
 
 				<div class="px-1 pt-1 pb-1.5 sticky bottom-0 z-10 -mt-2 sidebar">

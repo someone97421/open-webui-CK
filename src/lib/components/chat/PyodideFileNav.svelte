@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { v4 as uuidv4 } from 'uuid';
 	import { getContext, onMount, onDestroy, tick } from 'svelte';
 	import {
 		createPyodideWorker,
@@ -70,7 +71,7 @@
 	function sendWorkerMessage(msg: any, context: Context): Promise<any> {
 		if (!isCurrent(context)) return Promise.reject(new Error('Python context changed'));
 		const worker = createPyodideWorker(context.scope);
-		const id = `fs-${crypto.randomUUID()}`;
+		const id = `fs-${uuidv4()}`;
 		return new Promise((resolve, reject) => {
 			let settled = false;
 			const cleanup = () => {

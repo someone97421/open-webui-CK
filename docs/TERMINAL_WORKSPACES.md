@@ -28,12 +28,14 @@ WebUI 服务端从已保存聊天的数据库 `folder_id` 解析项目归属，�
 
 ### 项目 AGENTS.md
 
-项目设置的编辑器通过以下接口直接读写工作区根目录的 `AGENTS.md`，不存在时显示为空：
+项目主页只展示会话，`AGENTS.md` 的入口位于项目编辑的高级设置。展开后通过以下接口直接读写工作区根目录的文件：
 
 - `GET /api/v1/terminals/projects/{project_id}/agents`
-- `PUT /api/v1/terminals/projects/{project_id}/agents`，请求和响应均为 `{"content":"..."}`。
+- `PUT /api/v1/terminals/projects/{project_id}/agents`，请求为 `{"content":"..."}`。
 
-文本上限为 32 KiB，权限与项目写权限一致；归档项目可查看，恢复后才能保存。每轮模型请求重新读取同一个文件；不复制到文件夹 `system_prompt`。项目成员共享此文件，保存后下轮对话生效。
+两个接口响应均含 `content` 和 `exists`。缺失文件返回 `{"content":"","exists":false}`，编辑器置灰，由用户手动创建；已有空文件的 `exists` 为 `true`。创建空文件也会实际保存，不自动为新项目创建文件。工作区不可用属于加载错误，不当作文件缺失；普通项目设置仍可独立保存。
+
+文本上限为 32 KiB，权限与项目写权限一致；归档项目可查看，恢复后才能创建或保存。每轮模型请求重新读取同一个文件；不复制到文件夹 `system_prompt`。项目成员共享此文件，保存后下轮对话生效。
 
 ## Terminal 部署与协议
 
@@ -55,6 +57,37 @@ WebUI 对每次上传下载、工具调用、HTTP/WS 代理重新校验权限并
 v1 的用户＋聊天签名与 `/workspaces/<SHA256(user)>/<SHA256(chat)>/` 路径继续兼容。旧工作区数据保留，不自动搬迁。其他非聊天入口沿用各自的原有连接配置。
 
 Terminal 需要 Linux、bubblewrap 和允许 user namespace 的容器策略。隔离模式默认不提供外网；`OPEN_TERMINAL_WORKSPACE_NETWORK=shared` 可联网，但同时放开网络互达。隔离模式关闭 browser/desktop。详细部署、共享依赖与图片行为见 Terminal 仓库的 `docs/WORKSPACE_IMAGE_CONTEXT.md`。
+
+### NAS 上的 namespace 权限失败
+
+若 Terminal 日志出现 `bwrap: No permissions to create a new namespace`，同时 `/api/config` 返回 200、`/files/cwd`、文件列表及执行接口返回 503，说明请求已到达 Terminal，但宿主拒绝启动工作区。能力声明不等于工作进程已成功启动，修改连接 Key 或重复创建项目不能解决此故障。
+
+先在 NAS 上检查：
+
+```bash
+uname -r
+sysctl user.max_user_namespaces
+sysctl kernel.unprivileged_userns_clone
+docker inspect open-terminal --format '{{json .HostConfig.SecurityOpt}}'
+docker exec open-terminal bwrap --unshare-user --ro-bind / / /bin/true
+```
+
+部分内核没有 `kernel.unprivileged_userns_clone` 这一开关，单独缺少该项不能证明不支持 user namespace。还需结合宿主内核配置、AppArmor 拒绝记录和 bubblewrap 输出判断。
+
+在 NAS 的 Linux 6.12.30+、Docker 26.1.0、Compose v2.26.1 上，独立探测已确认仅解除 seccomp/AppArmor 仍会因 `/proc` 挂载被拒而失败。以下组合已在同镜像、UID/GID 1000:1000、无宿主挂载和生产凭据的一次性容器中验证，可启动实际工作进程并完成临时文件写入、列目录及 Python 命令执行：
+
+```yaml
+security_opt:
+  - seccomp=unconfined
+  - apparmor=unconfined
+  - systempaths=unconfined
+```
+
+这会放宽外层容器的 seccomp/AppArmor 策略并取消默认系统路径遮罩、只读限制，不修改 Key、项目目录或应用内工作区隔离，也未使用 `privileged` 或 `SYS_ADMIN`。这是已探测组合中的可运行配置，不等于最精细的权限规则；缺少内核 user namespace 能力时仍不能靠这些选项补足。
+
+该 NAS 的 Compose 已验证正确应用第三项。它可能不保留在 `SecurityOpt` 数组中，应检查实际的 `MaskedPaths=[]`、`ReadonlyPaths=[]`。旧镜像读取文本时暴露了图片识别的 `KeyError: 'MPO'`，源码已修复，尚待新镜像复测；不能把工作进程启动成功等同于全部文件工具恢复。生产项目身份签发、网关转发、项目子目录和 WebSocket 仍需验收。
+
+启动失败会保留 Terminal 的原始诊断日志，并返回可读的工作区错误；项目 AGENTS.md 接口保留上游的 503 状态。
 
 ## 验证范围
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { v4 as uuidv4 } from 'uuid';
 	import { getContext, onDestroy } from 'svelte';
 	import { readable, type Readable } from 'svelte/store';
 	import { toast } from 'svelte-sonner';
@@ -29,7 +30,7 @@
 	function readLocalFile(path: string, id: string): Promise<Blob> {
 		const scope = getPyodideScope(id);
 		const worker = createPyodideWorker(scope, { background: true });
-		const requestId = `link-${crypto.randomUUID()}`;
+		const requestId = `link-${uuidv4()}`;
 		return new Promise((resolve, reject) => {
 			const finish = () => {
 				worker.removeEventListener('message', handler);

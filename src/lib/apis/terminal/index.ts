@@ -148,6 +148,7 @@ export const registerTemporaryChat = async (token: string, chatId: string, sessi
 
 export type ProjectAgents = {
 	content: string;
+	exists: boolean;
 };
 
 const projectAgentsRequest = async (
@@ -176,7 +177,10 @@ const projectAgentsRequest = async (
 				: `AGENTS.md 请求失败（${response.status}）`
 		);
 	}
-	return { content: typeof result?.content === 'string' ? result.content : '' };
+	if (typeof result?.content !== 'string' || typeof result?.exists !== 'boolean') {
+		throw new Error('AGENTS.md 响应格式无效');
+	}
+	return { content: result.content, exists: result.exists };
 };
 
 export const getProjectAgents = (token: string, projectId: string) =>

@@ -4,11 +4,8 @@
 	import { socket, user } from '$lib/stores';
 
 	import ChatList from './ChatList.svelte';
-	import FolderKnowledge from './FolderKnowledge.svelte';
-	import ProjectAgentsEditor from './ProjectAgentsEditor.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { getSharedFolderChats } from '$lib/apis/folders';
-	import { isProjectFolder } from '$lib/utils/projects';
 	type FolderPlaceholderFolder = {
 		id?: string;
 		shared?: boolean;
@@ -24,7 +21,6 @@
 
 	export let folder: FolderPlaceholderFolder | null = null;
 	export let readOnly = false;
-	let selectedTab = 'chats';
 
 	const CHATS_PAGE_SIZE = 10;
 	let page = 1;
@@ -155,12 +151,9 @@
 		};
 	});
 
-	$: isProject = isProjectFolder(folder as any);
-
 	$: if (folder?.id && folder.id !== currentFolderId) {
 		currentFolderId = folder.id;
 		page = 1;
-		selectedTab = 'chats';
 		setChatList(true);
 	}
 
@@ -168,86 +161,26 @@
 		currentFolderId = null;
 		chats = [];
 		totalChats = 0;
-		selectedTab = 'chats';
 	}
 </script>
 
 <div>
-	<!-- <div class="mb-1">
-		<div
-			class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-normal bg-transparent py-1 touch-auto pointer-events-auto"
-		>
-			<button
-				class="min-w-fit p-1.5 {selectedTab === 'knowledge'
-					? ''
-					: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
-				type="button"
-				on:click={() => {
-					selectedTab = 'knowledge';
-				}}>{$i18n.t('Knowledge')}</button
-			>
-
-			<button
-				class="min-w-fit p-1.5 {selectedTab === 'chats'
-					? ''
-					: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
-				type="button"
-				on:click={() => {
-					selectedTab = 'chats';
-				}}
-			>
-				{$i18n.t('Chats')}
-			</button>
+	{#if chats !== null}
+		<ChatList
+			{chats}
+			{chatListLoading}
+			{showOwnerInfo}
+			{page}
+			total={totalChats}
+			perPage={CHATS_PAGE_SIZE}
+			{orderBy}
+			{direction}
+			onPageChange={setPage}
+			onSort={setSortKey}
+		/>
+	{:else}
+		<div class="py-10">
+			<Spinner />
 		</div>
-	</div> -->
-
-	<div class="">
-		{#if isProject}
-			<div class="mb-2 flex w-fit gap-1 rounded-lg bg-gray-50 p-0.5 dark:bg-gray-900" role="tablist" aria-label="项目内容">
-				<button
-					type="button"
-					role="tab"
-					aria-selected={selectedTab === 'chats'}
-					class="rounded-md px-2.5 py-1 text-xs transition-colors duration-150 {selectedTab === 'chats' ? 'bg-white text-gray-800 shadow-sm dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100'}"
-					on:click={() => (selectedTab = 'chats')}
-				>
-					会话
-				</button>
-				<button
-					type="button"
-					role="tab"
-					aria-selected={selectedTab === 'agents'}
-					class="rounded-md px-2.5 py-1 text-xs transition-colors duration-150 {selectedTab === 'agents' ? 'bg-white text-gray-800 shadow-sm dark:bg-gray-800 dark:text-gray-100' : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100'}"
-					on:click={() => (selectedTab = 'agents')}
-				>
-					AGENTS.md
-				</button>
-			</div>
-		{/if}
-
-		{#if selectedTab === 'knowledge'}
-			<FolderKnowledge />
-		{:else if selectedTab === 'agents' && isProject && folder?.id}
-			<ProjectAgentsEditor projectId={folder.id} {readOnly} />
-		{:else if selectedTab === 'chats'}
-			{#if chats !== null}
-				<ChatList
-					{chats}
-					{chatListLoading}
-					{showOwnerInfo}
-					{page}
-					total={totalChats}
-					perPage={CHATS_PAGE_SIZE}
-					{orderBy}
-					{direction}
-					onPageChange={setPage}
-					onSort={setSortKey}
-				/>
-			{:else}
-				<div class="py-10">
-					<Spinner />
-				</div>
-			{/if}
-		{/if}
-	</div>
+	{/if}
 </div>
