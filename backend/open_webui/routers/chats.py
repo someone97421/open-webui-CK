@@ -19,9 +19,9 @@ from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.chat_messages import ChatMessages
 from open_webui.models.chats import (
+    AggregateChatStats,
     Chat,
     ChatBody,
-    Chat,
     ChatForm,
     ChatHistoryStats,
     ChatImportForm,
