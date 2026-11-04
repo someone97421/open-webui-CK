@@ -64,6 +64,7 @@
 	const treeContentsCache = new Map<string, [string, FileEntry[]][]>();
 
 	const i18n = getContext<Readable<I18n>>('i18n');
+	const ensureTerminalChat = getContext<(() => Promise<string | null>) | undefined>('ensureTerminalChat');
 	// Keep the error fallback discoverable by the i18n extractor.
 	// t('Unknown error')
 
@@ -637,6 +638,34 @@
 	let terminalChatContextPending = false;
 	let terminalChatContextHidden = false;
 	let isPerChatTerminal = false;
+	let workspaceReadyId: string | null = null;
+	let workspaceReadyTerminalId: string | null = null;
+	let workspacePreparation: {
+		id: string | null;
+		selector: string | null;
+		servers: any;
+		settingsValue: any;
+	} | null = null;
+	const prepareWorkspace = async (id, selector, servers, settingsValue) => {
+		if (!ensureTerminalChat || disposed) return;
+		if (workspacePreparation?.id === id && workspacePreparation.selector === selector &&
+			workspacePreparation.servers === servers && workspacePreparation.settingsValue === settingsValue) return;
+		const preparation = { id, selector, servers, settingsValue };
+		workspacePreparation = preparation;
+		workspaceReadyId = null;
+		try {
+			const preparedId = await ensureTerminalChat();
+			await tick();
+			if (disposed || workspacePreparation !== preparation || !preparedId ||
+				effectiveTerminalId !== selector || (chatId && chatId !== preparedId)) return;
+			preparation.id = preparedId;
+			chatId = preparedId;
+			workspaceReadyTerminalId = selector;
+			workspaceReadyId = preparedId;
+		} catch (error) {
+			if (!disposed && workspacePreparation === preparation) toast.error(`${error}`);
+		}
+	};
 	$: previewBaseUrl =
 		selectedTerminal && isPerChatTerminal && chatId
 			? `${selectedTerminal.url}/chats/${encodeURIComponent(chatId)}`
@@ -650,11 +679,16 @@
 			: ($terminalServers?.[0] ?? null);
 		const chatConfig = chatContext(systemTerminal);
 		isPerChatTerminal = !!systemTerminal && chatConfig?.context_id === 'chat_id';
+		const isolated = systemTerminal?.features?.workspace_isolation === true;
 		terminalChatContextHidden =
 			!!systemTerminal &&
-			(chatConfig === false || (isPerChatTerminal && isTemporaryChatId(chatId)));
+			(chatConfig === false || (isPerChatTerminal && !isolated && isTemporaryChatId(chatId)));
 		terminalChatContextPending =
-			isPerChatTerminal && !terminalChatContextHidden && !isSavedChatId(chatId);
+			!terminalChatContextHidden && (
+				((isPerChatTerminal || isolated) && (isolated ? !chatId : !isSavedChatId(chatId))) ||
+				(!!ensureTerminalChat && (!chatId || workspaceReadyId !== chatId ||
+					workspaceReadyTerminalId !== effectiveTerminalId))
+			);
 		if (terminalChatContextHidden || terminalChatContextPending) return null;
 
 		const settingsValue: any = $settings;
@@ -677,13 +711,25 @@
 	let prevChatId = chatId;
 	let mounted = false;
 	let disposed = false;
+	let connectionLoaded = false;
+	let displayFileRequest: (request: any) => Promise<void> = async () => {};
+	let displayDirectoryRequest: (path: string | null) => Promise<void> = async () => {};
+	$: if (mounted && selectedTerminal && manageFileRequests && active && $showFileNavPath)
+		void displayFileRequest($showFileNavPath);
+	$: if (mounted && selectedTerminal && $showFileNavDir)
+		void displayDirectoryRequest($showFileNavDir);
+	$: if (mounted && ensureTerminalChat)
+		void prepareWorkspace(chatId, effectiveTerminalId, $terminalServers, $settings);
 	$: {
-		(effectiveTerminalId, $terminalServers, $settings);
+		(effectiveTerminalId, $terminalServers, $settings, workspaceReadyId, workspaceReadyTerminalId);
 		const terminal = getTerminal();
 		selectedTerminal = terminal;
 
 		const chatChanged = chatId !== prevChatId;
-		const oldChatId = prevChatId;
+		if (!terminal) {
+			if (connectionLoaded) ++loadGeneration;
+			connectionLoaded = false;
+		}
 		if (chatChanged) prevChatId = chatId;
 
 		const terminalChanged =
@@ -698,30 +744,16 @@
 			pinnedComparison = null;
 		}
 
-		if (mounted && terminal) {
-			if (chatChanged && chatId && !oldChatId) {
-				if (openedFile) {
-					openedFile = { ...openedFile, session_id: chatId };
-					publishFile();
-				}
-				// Chat just got created (null → real ID): persist the current
-				// browsed path as the new session's cwd — don't re-fetch.
-				setCwd(terminal.url, terminal.key, savedPath, chatId);
-			} else if (terminalChanged || chatChanged) {
-				++loadGeneration;
-				openedFile = null;
-				if (terminalContext) terminalContext = { ...terminalContext, file: null };
-				// Terminal switched, new chat started, or switched between
-				// existing chats — re-fetch the session cwd.
-				loading = true;
-				error = null;
-				entries = [];
-				resetTreeState();
-				(async () => {
-					savedPath = applyCwd(await getCwd(terminal.url, terminal.key, chatId ?? undefined));
-					loadDir(savedPath);
-				})();
-			}
+		if (mounted && terminal && (!connectionLoaded || terminalChanged || chatChanged)) {
+			connectionLoaded = true;
+			++loadGeneration;
+			openedFile = null;
+			if (terminalContext) terminalContext = { ...terminalContext, file: null };
+			loading = true;
+			error = null;
+			entries = [];
+			resetTreeState();
+			void initializeDirectory(terminal);
 		}
 	}
 
@@ -1857,17 +1889,43 @@
 		}
 	};
 
+	const initializeDirectory = async (terminal: { url: string; key: string }) => {
+		const generation = loadGeneration;
+		const selector = effectiveTerminalId;
+		const session = chatId;
+		const current = () => !disposed && generation === loadGeneration &&
+			selector === effectiveTerminalId && session === chatId &&
+			selectedTerminal?.url === terminal.url && selectedTerminal?.key === terminal.key;
+		const serverCwd = await getCwd(terminal.url, terminal.key, session ?? undefined);
+		if (!current()) return;
+		const serverPath = applyCwd(serverCwd);
+		savedPath = clampToFileRoot(
+			terminalContext?.terminalId === selector ? terminalContext.currentDirectory : serverPath
+		);
+		if (initialFile) {
+			const file = initialFile;
+			const path = normalizePath(file.path);
+			const slash = path.lastIndexOf('/');
+			await loadDir(slash > 0 ? path.slice(0, slash + 1) : '/');
+			if (disposed || loadGeneration !== generation + 1 || selector !== effectiveTerminalId ||
+				session !== chatId || !selectedTerminal) return;
+			await openEntry(
+				entries.find((entry) => entry.name === path.slice(slash + 1)) ?? {
+					name: path.slice(slash + 1), type: 'file', writable: currentWritable
+				},
+				{ page: file.page }
+			);
+		} else {
+			await loadDir(initialDirectory ?? savedPath, { restoreTree: true });
+		}
+	};
+
 	// Lifecycle
 	onMount(() => {
 		showHidden = localStorage.getItem('fileNav:showHidden') === 'true';
 		viewMode = localStorage.getItem('fileNav:viewMode') === 'grid' ? 'grid' : 'list';
-		const terminal = getTerminal();
-
-		let handledDisplayFile = false;
-
-		const unsubFileNav = showFileNavPath.subscribe(async (request) => {
+		const unsubFileNav = showFileNavPath.subscribe(displayFileRequest = async (request) => {
 			if (!manageFileRequests || !active || !request || !selectedTerminal || comparison) return;
-			handledDisplayFile = true;
 			showFileNavPath.set(null);
 			let filePath = typeof request === 'string' ? request : request.path;
 			const targetPage = typeof request === 'string' ? null : request.page;
@@ -1899,7 +1957,7 @@
 			}
 		});
 
-		const unsubFileNavDir = showFileNavDir.subscribe(async (filePath) => {
+		const unsubFileNavDir = showFileNavDir.subscribe(displayDirectoryRequest = async (filePath) => {
 			if (!filePath || !selectedTerminal || effectiveTerminalId !== $selectedTerminalId) return;
 			showFileNavDir.set(null);
 			filePath = normalizePath(filePath);
@@ -1923,36 +1981,6 @@
 				}
 			}
 		});
-
-		if (!handledDisplayFile && terminal) {
-			loading = true;
-
-			void (async () => {
-				const serverCwd = await getCwd(terminal.url, terminal.key, chatId ?? undefined);
-				if (disposed) return;
-				const serverPath = applyCwd(serverCwd);
-				savedPath =
-					terminalContext && terminalContext.terminalId === effectiveTerminalId
-						? terminalContext.currentDirectory
-						: serverPath;
-				savedPath = clampToFileRoot(savedPath);
-				if (initialFile) {
-					const path = normalizePath(initialFile.path);
-					const slash = path.lastIndexOf('/');
-					await loadDir(slash > 0 ? path.slice(0, slash + 1) : '/');
-					await openEntry(
-						entries.find((entry) => entry.name === path.slice(slash + 1)) ?? {
-							name: path.slice(slash + 1),
-							type: 'file',
-							writable: currentWritable
-						},
-						{ page: initialFile.page }
-					);
-				} else {
-					await loadDir(initialDirectory ?? savedPath, { restoreTree: true });
-				}
-			})();
-		}
 
 		mounted = true;
 
@@ -2063,7 +2091,7 @@
 			class="text-gray-300 dark:text-gray-600 mb-2"
 		/>
 		<div class="text-xs text-gray-500 dark:text-gray-400">
-			{$i18n.t('Start the chat to use this terminal.')}
+			{#if ensureTerminalChat}<Spinner />{:else}{$i18n.t('Start the chat to use this terminal.')}{/if}
 		</div>
 	</div>
 {:else if !selectedTerminal}

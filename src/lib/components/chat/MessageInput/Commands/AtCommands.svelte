@@ -31,6 +31,9 @@
 	import { toast } from 'svelte-sonner';
 
 	const i18n = getContext<any>('i18n');
+	const ensureTerminalChat = getContext<((history?: any) => Promise<string | null>) | undefined>('ensureTerminalChat');
+	let disposed = false;
+	let filesystemSearch = 0;
 
 	export let query = '';
 	export let onSelect: (e: any) => void = () => {};
@@ -97,6 +100,8 @@
 	}
 
 	onDestroy(() => {
+		disposed = true;
+		++filesystemSearch;
 		clearTimeout(searchDebounceTimer);
 	});
 
@@ -108,17 +113,23 @@
 	};
 
 	const getFilesystemItems = async (terminal = getSelectedTerminal()) => {
+		const version = ++filesystemSearch;
+		const searchQuery = query;
 		if (!terminal) {
 			filesystemItems = [];
 			return;
 		}
 
 		const terminalId = $selectedTerminalId;
-		const sessionId = $activeChatId;
+		const sessionId = ensureTerminalChat
+			? await ensureTerminalChat().catch(() => null)
+			: $activeChatId;
+		if (disposed || version !== filesystemSearch || query !== searchQuery ||
+			terminalId !== $selectedTerminalId || !sessionId) return;
 		const res = await searchFiles(
 			terminal.url,
 			terminal.key,
-			query,
+			searchQuery,
 			'.',
 			20,
 			'any',
@@ -126,7 +137,8 @@
 			localStorage.getItem('fileNav:showHidden') === 'true'
 		).catch(() => null);
 
-		if (terminalId !== $selectedTerminalId || sessionId !== $activeChatId) return;
+		if (disposed || version !== filesystemSearch || query !== searchQuery ||
+			terminalId !== $selectedTerminalId || sessionId !== $activeChatId) return;
 		filesystemItems = (res?.results ?? []).map((item: any) => ({
 			...filesystemFile(item, terminalId!, sessionId || null),
 			filesystem_type: item.type,
@@ -146,7 +158,8 @@
 		if (systemTerminal) {
 			if (
 				systemChatContext === false ||
-				(isTemporaryChatId($activeChatId) && systemChatContext?.context_id === 'chat_id')
+				(isTemporaryChatId($activeChatId) && systemChatContext?.context_id === 'chat_id' &&
+					systemTerminal.features?.workspace_isolation !== true)
 			) {
 				return null;
 			}

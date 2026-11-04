@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from open_webui.env import AIOHTTP_CLIENT_TIMEOUT_TERMINAL, ENABLE_TOOL_SERVERS
 from open_webui.utils.chat_id import is_saved_chat_id
+from open_webui.utils.terminal_identity import terminal_identity_headers
 from open_webui.utils.skill_files import (
     SKILL_CONTENT_MAX_CHARS,
     bounded_skill_manifest,
@@ -174,9 +175,7 @@ async def get_terminal_json(
             metadata=metadata,
         )
         headers['Accept'] = 'application/json'
-        headers['X-User-Id'] = user_model.id
-        if metadata.get('chat_id'):
-            headers['X-Session-Id'] = metadata['chat_id']
+        headers = await terminal_identity_headers(request, connection, user_model, metadata.get('chat_id'), headers)
         if context_id:
             headers[TERMINAL_CONTEXT_HEADER] = context_id
         body = None

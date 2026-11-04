@@ -21,7 +21,7 @@
 	dayjs.extend(duration);
 	dayjs.extend(relativeTime);
 
-	import { onMount, tick, getContext, createEventDispatcher } from 'svelte';
+	import { onDestroy, onMount, tick, getContext, createEventDispatcher } from 'svelte';
 
 	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
 	import { pickAndDownloadFile } from '$lib/utils/onedrive-file-picker';
@@ -134,6 +134,9 @@
 	import TaskList from './Messages/ResponseMessage/TaskList.svelte';
 
 	const i18n: any = getContext('i18n');
+	const ensureTerminalChat = getContext<((history: any) => Promise<string | null>) | undefined>('ensureTerminalChat');
+	let uploadDisposed = false;
+	onDestroy(() => { uploadDisposed = true; });
 
 	type AskUserPrompt = {
 		id?: string;
@@ -1036,6 +1039,10 @@
 	};
 
 	const uploadTerminalFile = async (fileItem, sessionId: string | null) => {
+		const uploadHistory = history;
+		const selector = $selectedTerminalId;
+		const current = () => !uploadDisposed && history === uploadHistory &&
+			$selectedTerminalId === selector && files.includes(fileItem) && chatId === sessionId;
 		fileItem.status = 'uploading';
 		fileItem.error = '';
 		files = files;
@@ -1044,7 +1051,8 @@
 			if (!terminal) throw new Error('The attached file’s terminal is unavailable.');
 			if (fileItem.session_id && fileItem.session_id !== sessionId)
 				throw new Error('Attached files must belong to this chat.');
-			if (terminal.contexts?.chat?.context_id === 'chat_id' && !isSavedChatId(sessionId))
+			if (terminal.contexts?.chat?.context_id === 'chat_id' &&
+				terminal.features?.workspace_isolation !== true && !isSavedChatId(sessionId))
 				throw new Error('A saved chat is required for this terminal');
 
 			const cwd =
@@ -1052,6 +1060,7 @@
 					? terminalContext?.currentDirectory
 					: null) || (await getCwd(terminal.url, terminal.key, sessionId || undefined))?.cwd;
 			if (!cwd) throw new Error($i18n.t('Could not determine the upload folder.'));
+			if (!current()) return false;
 			const uploadedFile = await uploadNewFileToTerminal(
 				terminal.url,
 				terminal.key,
@@ -1060,6 +1069,7 @@
 				sessionId || undefined
 			);
 			if (!uploadedFile) throw new Error($i18n.t('Failed to upload file.'));
+			if (!current()) return false;
 
 			fileItem.status = 'uploaded';
 			fileItem.session_id = sessionId;
@@ -1071,12 +1081,13 @@
 			fileItem.file = uploadedFile;
 			showFileNavDir.set(uploadedFile.path);
 		} catch (error) {
+			if (!current()) return false;
 			fileItem.status = 'error';
 			fileItem.error = `${error}`;
 			toast.error(fileItem.error);
 			return false;
 		} finally {
-			files = files;
+			if (current()) files = files;
 		}
 		return true;
 	};
@@ -1096,7 +1107,18 @@
 		return !files.some((item) => item.status === 'pending' && item.file instanceof File);
 	};
 
-	const uploadFileHandler = async (file, process = true, itemData = {}) => {
+	const terminalUploads = new Set<Promise<any>>();
+	export const waitForTerminalUploads = async () => {
+		while (terminalUploads.size) await Promise.all([...terminalUploads]);
+	};
+	const uploadFileHandler = (file, process = true, itemData = {}) => {
+		const terminalUpload = !!getFilesystemUploadTerminal();
+		const upload = performUpload(file, process, itemData);
+		if (!terminalUpload) return upload;
+		terminalUploads.add(upload);
+		return upload.finally(() => terminalUploads.delete(upload));
+	};
+	const performUpload = async (file, process = true, itemData = {}) => {
 		if ($_user?.role !== 'admin' && !($_user?.permissions?.chat?.file_upload ?? true)) {
 			toast.error($i18n.t('You do not have permission to upload files.'));
 			return null;
@@ -1138,17 +1160,29 @@
 			fileItem.type = 'filesystem';
 			fileItem.file = file;
 			fileItem.terminal_id = $selectedTerminalId;
-			fileItem.session_id = chatId || null;
-			if (!chatId && filesystemUploadTerminal.contexts?.chat?.context_id === 'chat_id') {
-				fileItem.status = 'pending';
-				files = files;
-				return;
+			const uploadHistory = history;
+			const selector = $selectedTerminalId;
+			try {
+				const sessionId = ensureTerminalChat ? await ensureTerminalChat(uploadHistory) : chatId;
+				await tick();
+				if (uploadDisposed || history !== uploadHistory || !files.includes(fileItem)) return;
+				if (selector !== $selectedTerminalId) {
+					files = files.filter((item) => item !== fileItem);
+					return;
+				}
+				if (!sessionId || sessionId !== chatId) throw new Error('A chat is required for terminal uploads.');
+				fileItem.session_id = sessionId;
+				if (!(await uploadTerminalFile(fileItem, sessionId))) {
+					if (history === uploadHistory) files = files.filter((item) => item !== fileItem);
+					return;
+				}
+				if (history === uploadHistory && selector === $selectedTerminalId) onUpdate({ file: fileItem });
+			} catch (error) {
+				if (!uploadDisposed && history === uploadHistory && selector === $selectedTerminalId) {
+					files = files.filter((item) => item !== fileItem);
+					toast.error(`${error}`);
+				}
 			}
-
-			if (!(await uploadTerminalFile(fileItem, fileItem.session_id))) {
-				files = files.filter((item) => item?.itemId !== tempItemId);
-			}
-			onUpdate({ file: fileItem });
 			return;
 		}
 

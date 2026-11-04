@@ -85,6 +85,7 @@ export type TerminalFeatures = {
 	desktop?: boolean;
 	git?: boolean;
 	events?: boolean;
+	workspace_isolation?: boolean;
 };
 
 // Missing flags mean unsupported; never probe a new endpoint on an older server.
@@ -130,6 +131,20 @@ export type TerminalSkill = {
 };
 
 import { WEBUI_API_BASE_URL } from '$lib/constants';
+
+export const registerTemporaryChat = async (token: string, chatId: string, sessionId: string) => {
+	const response = await fetch(`${WEBUI_API_BASE_URL}/terminals/chats/prepare`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ chat_id: chatId, session_id: sessionId })
+	});
+	const result = await response.json();
+	if (!response.ok) throw new Error(result?.detail ?? 'Failed to prepare terminal chat.');
+	return result;
+};
 
 export type TerminalConnection = {
 	selector: string;
@@ -223,6 +238,7 @@ export type TerminalServer = {
 	url: string;
 	name: string;
 	contexts?: Record<string, false | { context_id?: string }>;
+	features?: TerminalFeatures;
 	config?: {
 		chat_uploads?: 'default' | 'filesystem';
 		[key: string]: unknown;

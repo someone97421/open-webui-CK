@@ -81,6 +81,7 @@
 	import { acquireWakeLock } from '$lib/utils/wakeLock';
 	import { routeAvatarAnimation } from '$lib/utils/voice-avatar';
 	import { createTemporaryChatId, isTemporaryChatId } from '$lib/utils/chatId';
+	import { registerTemporaryChat } from '$lib/apis/terminal';
 	import { resumeTemporaryChat } from '$lib/apis';
 	import {
 		applyResponseStreamEvent,
@@ -2507,7 +2508,10 @@
 		stopAudio();
 	});
 	beforeNavigate(({ from, to }) => {
-		if (!embedded && to && from?.url.pathname !== to.url.pathname) loading = true;
+		if (!embedded && to && from?.url.pathname !== to.url.pathname) {
+			startChatLoad();
+			loading = true;
+		}
 		bridge?.end();
 		pendingUrlActions = null;
 	});
@@ -3880,41 +3884,86 @@
 	let tabTitleEditor: import('svelte').Snippet | undefined;
 	let tabActions: import('svelte').Snippet | undefined;
 
-	const getChatId = async (_history: typeof history) => {
-		let _chatId = $chatId;
-		// Empty embedded drafts create their backing chat only when the first message is sent.
-		if (!_chatId) {
-			if (embedded && onCreateEmbeddedChat) {
-				const createdChat = await onCreateEmbeddedChat();
-				if (!createdChat?.id) {
-					toast.error($i18n.t('Failed to create chat'));
-					return null;
-				}
-				if (history !== _history) return null;
-
-				chat = createdChat;
-				_chatId = createdChat.id;
-				loadedChatIdProp = _chatId;
-				await chatId.set(_chatId);
-				await chatTitle.set(createdChat?.chat?.title ?? createdChat?.title ?? $i18n.t('Chat'));
-
-				params = structuredClone(createdChat?.chat?.params ?? {});
-				delete params.note_id;
-				chatFiles = mergeFiles(chatFiles, createdChat?.chat?.files ?? []);
-				await onSelectEmbeddedChat?.(_chatId);
-			} else if ($temporaryChatEnabled) {
-				_chatId = createTemporaryChatId($socket?.id);
-				await chatId.set(_chatId);
+	let chatIdRequest: {
+		history: typeof history;
+		signal: AbortSignal;
+		promise: Promise<string | null>;
+	} | null = null;
+	let registeredTemporaryChat = '';
+	let temporaryChatPreparation: { registration: string; promise: Promise<void> } | null = null;
+	const prepareTemporaryTerminal = async (id: string, _history: typeof history, signal: AbortSignal) => {
+		const sessionId = $socket?.id;
+		if (!sessionId) throw new Error('Terminal access requires an active connection.');
+		const registration = `${id}:${sessionId}`;
+		if (registeredTemporaryChat !== registration) {
+			const preparation = temporaryChatPreparation?.registration === registration
+				? temporaryChatPreparation
+				: { registration, promise: registerTemporaryChat(localStorage.token, id, sessionId).then(() => {}) };
+			temporaryChatPreparation = preparation;
+			try {
+				await preparation.promise;
+			} finally {
+				if (temporaryChatPreparation === preparation) temporaryChatPreparation = null;
 			}
-			if (!_chatId && terminalTabs?.hasTerminals()) {
-				_chatId = await initChatHandler(_history);
-			}
-			await tick();
+			if (history !== _history || signal.aborted || $socket?.id !== sessionId) return false;
+			registeredTemporaryChat = registration;
 		}
-		if (history !== _history) return null;
-		if (_chatId) await terminalTabs?.bindTerminalChat(_chatId);
-		return _chatId;
+		return history === _history && !signal.aborted && $socket?.id === sessionId;
 	};
+	const getChatId = async (_history: typeof history, ensureTerminal = false): Promise<string | null> => {
+		const signal = chatLoadController.signal;
+		if (history !== _history || signal.aborted) return null;
+		if (chatIdRequest?.history === _history && chatIdRequest.signal === signal) {
+			const pending = chatIdRequest;
+			const id = await pending.promise;
+			if (history !== _history || signal.aborted) return null;
+			if (ensureTerminal && (!id || (isTemporaryChatId(id) &&
+				registeredTemporaryChat !== `${id}:${$socket?.id}`))) {
+				if (chatIdRequest === pending) chatIdRequest = null;
+				return getChatId(_history, true);
+			}
+			return id;
+		}
+		const terminalSelected =
+			$config?.features?.enable_tool_servers && !!$selectedTerminalId;
+		const needsTerminal = ensureTerminal || terminalSelected || terminalTabs?.hasTerminals();
+		const request = { history: _history, signal, promise: Promise.resolve<string | null>(null) };
+		request.promise = (async () => {
+			let id = $chatId;
+			if (!id) {
+				if (embedded && onCreateEmbeddedChat) {
+					const createdChat = await onCreateEmbeddedChat();
+					if (history !== _history || signal.aborted) return null;
+					if (!createdChat?.id) throw new Error($i18n.t('Failed to create chat'));
+					chat = createdChat;
+					id = createdChat.id;
+					loadedChatIdProp = id;
+					chatId.set(id);
+					chatTitle.set(createdChat?.chat?.title ?? createdChat?.title ?? $i18n.t('Chat'));
+					params = structuredClone(createdChat?.chat?.params ?? {});
+					delete params.note_id;
+					chatFiles = mergeFiles(chatFiles, createdChat?.chat?.files ?? []);
+					await onSelectEmbeddedChat?.(id);
+				} else if ($temporaryChatEnabled || needsTerminal) {
+					id = await initChatHandler(_history, needsTerminal);
+				}
+			}
+			if (history !== _history || signal.aborted) return null;
+			if (id && needsTerminal && isTemporaryChatId(id) &&
+				!(await prepareTemporaryTerminal(id, _history, signal))) return null;
+			await tick();
+			if (history !== _history || signal.aborted) return null;
+			if (id) await terminalTabs?.bindTerminalChat(id);
+			return history === _history && !signal.aborted ? id : null;
+		})();
+		chatIdRequest = request;
+		try {
+			return await request.promise;
+		} finally {
+			if (chatIdRequest === request) chatIdRequest = null;
+		}
+	};
+	setContext('ensureTerminalChat', (_history = history) => getChatId(_history, true));
 
 	const submitHandler = async (
 		userPrompt: string,
@@ -4035,23 +4084,26 @@
 		}
 
 		const currentHistory = history;
+		const currentTerminalId = $selectedTerminalId;
 		processing = 'uploading';
 		try {
 			const _chatId = await getChatId(currentHistory);
 			if (_chatId === null) return { status: 'rejected' };
 
-			if (history !== currentHistory) return { status: 'rejected' };
+			if (history !== currentHistory || $selectedTerminalId !== currentTerminalId) return { status: 'rejected' };
+			await messageInput?.waitForTerminalUploads();
+			if (history !== currentHistory || $selectedTerminalId !== currentTerminalId) return { status: 'rejected' };
 			if (
 				files.some((file) => file.status === 'pending' && file.file instanceof File) &&
 				!(await messageInput?.uploadPendingFiles(_chatId || (await initChatHandler(history))))
 			)
 				return { status: 'rejected' };
-			if (history !== currentHistory) return { status: 'rejected' };
+			if (history !== currentHistory || $selectedTerminalId !== currentTerminalId) return { status: 'rejected' };
 		} catch (error) {
 			toast.error(`${error}`);
 			return { status: 'rejected' };
 		} finally {
-			processing = '';
+			if (history === currentHistory) processing = '';
 		}
 
 		if (
@@ -4881,7 +4933,22 @@
 		}
 	};
 
-	const initChatHandler = async (_history: typeof history) => {
+	let chatCreation: { history: typeof history; signal: AbortSignal; promise: Promise<string> } | null = null;
+	const initChatHandler = async (_history: typeof history, prepareTerminal = false): Promise<string> => {
+		const signal = chatLoadController.signal;
+		if (history !== _history || signal.aborted) return '';
+		if (chatCreation?.history === _history && chatCreation.signal === signal)
+			return chatCreation.promise;
+		if ($chatId) return $chatId;
+		const creation = { history: _history, signal, promise: createChatHandler(_history, signal, prepareTerminal) };
+		chatCreation = creation;
+		try {
+			return await creation.promise;
+		} finally {
+			if (chatCreation === creation) chatCreation = null;
+		}
+	};
+	const createChatHandler = async (_history: typeof history, signal: AbortSignal, prepareTerminal: boolean) => {
 		let _chatId = $chatId;
 		const selectedFolderId = $selectedFolder?.id;
 
@@ -4904,10 +4971,10 @@
 			);
 
 			if (!createdChat?.id) throw new Error($i18n.t('Failed to create chat'));
-			if (history !== _history || $chatId !== _chatId) return '';
+			if (history !== _history || signal.aborted || $chatId !== _chatId) return '';
 			chat = createdChat;
 			_chatId = chat.id;
-			await chatId.set(_chatId);
+			chatId.set(_chatId);
 
 			if (!embedded) {
 				saveDraft(getChatInputDraft(), _chatId, false);
@@ -4915,19 +4982,26 @@
 			}
 
 			await tick();
+			if (history !== _history || signal.aborted) return '';
 
 			if (!embedded) {
 				await refreshChatList(localStorage.token);
 			}
+			if (history !== _history || signal.aborted) return '';
 
 			if (selectedFolderId) {
 				await refreshFolderChatLists(selectedFolderId, chat);
 			}
+			if (history !== _history || signal.aborted) return '';
 
 			selectedFolder.set(null);
 		} else {
 			_chatId = isTemporaryChatId(_chatId) ? _chatId : createTemporaryChatId($socket?.id);
-			await chatId.set(_chatId);
+			if ((prepareTerminal || ($config?.features?.enable_tool_servers && $selectedTerminalId) ||
+				terminalTabs?.hasTerminals()) &&
+				!(await prepareTemporaryTerminal(_chatId, _history, signal))) return '';
+			if (history !== _history || signal.aborted) return '';
+			chatId.set(_chatId);
 		}
 		await tick();
 

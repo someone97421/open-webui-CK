@@ -125,6 +125,7 @@ from open_webui.utils.plugin import (
     load_tool_module_by_id,
     set_tool_module_in_cache,
 )
+from open_webui.utils.terminal_identity import terminal_identity_headers
 from open_webui.utils.terminals import (
     TERMINAL_CONTEXT_HEADER,
     get_terminal_server_url,
@@ -1587,6 +1588,7 @@ async def get_terminal_tools(
         raise RuntimeError(f"Terminal server '{terminal_id}' requires a saved {terminal_context} context")
     if context_id:
         headers[TERMINAL_CONTEXT_HEADER] = context_id
+    headers = await terminal_identity_headers(request, connection, user, session_id, headers)
 
     # Fetch live with the user's credentials so prompt changes apply without a restart
     connection_config = connection.get('config') or {}
@@ -1620,7 +1622,7 @@ async def get_terminal_tools(
                     params.pop('page', None)
                 return await execute_tool_server(
                     url=srv_data['url'],
-                    headers=hdrs,
+                    headers=await terminal_identity_headers(request, connection, user, session_id, hdrs),
                     cookies=cks,
                     name=fn_name,
                     params=params,

@@ -73,8 +73,11 @@
 	import Modal from '../common/Modal.svelte';
 	import XMark from '../icons/XMark.svelte';
 	import { isSavedChatId } from '$lib/utils/chatId';
+	import { toast } from 'svelte-sonner';
 
 	const i18n = getContext<any>('i18n');
+	const ensureTerminalChat = getContext<((history: any) => Promise<string | null>) | undefined>('ensureTerminalChat');
+	let disposed = false;
 
 	export let history;
 
@@ -128,7 +131,9 @@
 	let terminalViews: Record<string, XTerminal> = {};
 	export const hasTerminals = () => tabs.tabs.some((tab) => tab.kind === 'terminal');
 	export async function bindTerminalChat(id: string) {
+		const panelHistory = history;
 		await tick();
+		if (disposed || history !== panelHistory || chatId !== id) return;
 		await Promise.all(
 			tabs.tabs
 				.filter((tab) => tab.kind === 'terminal')
@@ -234,7 +239,24 @@
 		tabs = activateTab(tabs, id);
 		showTabs.set(true);
 	};
-	const openPanel = (tab: PanelTab) => {
+	const openPanel = async (tab: PanelTab) => {
+		if (tab.terminalId) {
+			const panelHistory = history;
+			const selector = $selectedTerminalId;
+			try {
+				const id = ensureTerminalChat ? await ensureTerminalChat(panelHistory) : chatId;
+				await tick();
+				if (disposed || history !== panelHistory || selector !== $selectedTerminalId || !id || chatId !== id) return;
+				if (tab.kind === 'browser') {
+					const terminal = ($terminalServers ?? []).find((item) => item.id === tab.terminalId);
+					if (chatContext(terminal)?.context_id === 'chat_id' && tab.connection)
+						tab.browserBaseUrl = `${tab.connection.baseUrl}/chats/${encodeURIComponent(id)}`;
+				}
+			} catch (error) {
+				if (!disposed && history === panelHistory && selector === $selectedTerminalId) toast.error(`${error}`);
+				return;
+			}
+		}
 		hasOpenedTabs = true;
 		tabs = openTab(tabs, tab);
 		showTabs.set(true);
@@ -457,7 +479,7 @@
 	const chatContext = (terminal: any) => terminal?.contexts?.chat ?? {};
 	const chatContextAvailable = (terminal: any) => chatContext(terminal) !== false;
 	const chatContextNeedsSavedChat = (terminal: any) =>
-		chatContext(terminal)?.context_id === 'chat_id';
+		chatContext(terminal)?.context_id === 'chat_id' && terminal?.features?.workspace_isolation !== true;
 	$: selectedSystemTerminal = ($terminalServers ?? []).find(
 		(t) => t.id && t.id === $selectedTerminalId
 	);
@@ -602,7 +624,7 @@
 		try {
 			const result = await terminalRequest<{
 				features?: { terminal?: boolean; desktop?: boolean; browser?: boolean };
-			}>(selectedConnection, chatId, '/api/config');
+			}>(selectedConnection, null, '/api/config');
 			if (version === featureVersion) {
 				terminalEnabled = result.features?.terminal !== false;
 				desktopEnabled = result.features?.desktop === true;
@@ -713,6 +735,7 @@
 		})();
 	});
 	onDestroy(() => {
+		disposed = true;
 		++countVersion;
 		++featureVersion;
 		showOverview.set(false);

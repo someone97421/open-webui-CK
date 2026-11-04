@@ -27,6 +27,7 @@ from open_webui.utils.auth import get_verified_user, get_verified_user_by_token
 from open_webui.utils.browser import browser_access, browser_ticket
 from open_webui.utils.headers import bearer_auth_header, normalize_bearer_token
 from open_webui.utils.json_codec import JSONCodec
+from open_webui.utils.terminal_identity import terminal_identity_headers, verify_terminal_chat_access
 from open_webui.utils.terminals import (
     TERMINAL_CONTEXT_HEADER,
     get_terminal_server_url,
@@ -191,10 +192,12 @@ async def relay_to_browser(ws, upstream):
             return
 
 
-async def watch_access(server_id, sid, ticket):
+async def watch_access(ws, server_id, sid, ticket):
     while True:
         await asyncio.sleep(10)
-        current_user, _ = await browser_access(server_id, sid, ticket)
+        current_user, current_data = await browser_access(server_id, sid, ticket)
+        if current_data.get('chat'):
+            await verify_terminal_chat_access(ws, current_user, current_data['chat'])
         latest = await Config.get('terminal_server.connections', []) or []
         current = next((c for c in latest if c.get('id') == server_id), None)
         if (
@@ -239,6 +242,7 @@ async def browser_ws(ws: WebSocket, server_id: str, sid: str, ticket: str, kind:
         headers['Authorization'] = data['relay']['authorization']
     tasks = []
     try:
+        headers = await terminal_identity_headers(ws, connection, user, chat, headers)
         async with aiohttp.ClientSession(cookies=data['relay'].get('cookies', {}), trust_env=True) as client:
             async with client.ws_connect(
                 url,
@@ -249,7 +253,7 @@ async def browser_ws(ws: WebSocket, server_id: str, sid: str, ticket: str, kind:
                 tasks = [
                     asyncio.create_task(relay_from_browser(ws, upstream)),
                     asyncio.create_task(relay_to_browser(ws, upstream)),
-                    asyncio.create_task(watch_access(server_id, sid, ticket)),
+                    asyncio.create_task(watch_access(ws, server_id, sid, ticket)),
                 ]
                 await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     except aiohttp.WSServerHandshakeError as exc:
@@ -262,6 +266,31 @@ async def browser_ws(ws: WebSocket, server_id: str, sid: str, ticket: str, kind:
         await asyncio.gather(*tasks, return_exceptions=True)
         with suppress(Exception):
             await ws.close(code=1011)
+
+
+@router.post('/chats/prepare')
+async def prepare_terminal_chat(request: Request, form_data: dict, user=Depends(get_verified_user)):
+    """首次上传前登记临时聊天；普通聊天由现有 /chats/new 持久化。"""
+    from open_webui.socket.main import get_user_id_from_session_pool
+    from open_webui.utils.chat import register_temporary_chat_session
+    from open_webui.utils.chat_id import is_temporary_chat_id
+
+    chat_id = form_data.get('chat_id')
+    if not isinstance(chat_id, str) or len(chat_id.encode('utf-8')) > 1024:
+        raise HTTPException(status_code=400, detail='A valid terminal chat is required')
+    if is_temporary_chat_id(chat_id):
+        session_id = form_data.get('session_id')
+        if not isinstance(session_id, str) or not await register_temporary_chat_session(
+            request.app.state.redis,
+            chat_id,
+            user.id,
+            session_id,
+            get_user_id_from_session_pool(session_id),
+            create=True,
+        ):
+            raise HTTPException(status_code=404, detail='Temporary chat expired or unavailable')
+    await verify_terminal_chat_access(request, user, chat_id)
+    return {'chat_id': chat_id}
 
 
 @router.get('/')
@@ -375,6 +404,7 @@ async def proxy_terminal(
         if oauth_token:
             headers.update(bearer_auth_header(oauth_token.get('access_token', '')))
     # auth_type == "none": no Authorization header
+    headers = await terminal_identity_headers(request, connection, user, session_id, headers)
 
     if browser_auth is not None:
         for name in (
@@ -644,6 +674,13 @@ async def _proxy_terminal_websocket(
         upstream_url += f'?{urllib.parse.urlencode(upstream_params)}'
 
     request = Request({**ws.scope, 'type': 'http', 'method': 'GET'})
+    try:
+        upstream_headers = await terminal_identity_headers(request, connection, user, chat_id, upstream_headers)
+    except HTTPException as error:
+        await ws.close(code=4003, reason=str(error.detail))
+        return
+    if connection.get('auth_type', 'bearer') == 'bearer':
+        upstream_headers.update(bearer_auth_header(connection.get('key', '')))
     opened = False
     session = aiohttp.ClientSession()
     try:
@@ -658,7 +695,7 @@ async def _proxy_terminal_websocket(
             auth_type = connection.get('auth_type', 'bearer')
             if auth_type == 'bearer':
                 key = normalize_bearer_token(connection.get('key', ''))
-                await upstream.send_str(_json.dumps({'type': 'auth', 'token': key}))
+                await upstream.send_str(_json.dumps({'type': 'auth', 'token': key, 'chat_id': chat_id}))
             elif auth_type == 'session' and is_terminal_orchestrator(connection):
                 await upstream.send_str(_json.dumps({'type': 'auth', 'token': token}))
             else:
@@ -715,6 +752,12 @@ async def _proxy_terminal_websocket(
                         await asyncio.sleep(10)
                         if await _resolve_terminal_access(ws, server_id, token) is None:
                             return
+                        if chat_id:
+                            try:
+                                await verify_terminal_chat_access(ws, user, chat_id)
+                            except HTTPException as error:
+                                await ws.close(code=4003, reason=str(error.detail))
+                                return
                 except Exception:
                     log.exception('Terminal access recheck failed')
 

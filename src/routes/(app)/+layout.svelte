@@ -11,7 +11,7 @@
 	import { getSkills } from '$lib/apis/skills';
 	import { getSessionUser } from '$lib/apis/auths';
 	import { getBanners } from '$lib/apis/configs';
-	import { getTerminalServers } from '$lib/apis/terminal';
+	import { getTerminalConfig, getTerminalServers } from '$lib/apis/terminal';
 	import { getUserSettings } from '$lib/apis/users';
 	import { setAppFontFamily, setTextScale } from '$lib/utils/text-scale';
 
@@ -124,7 +124,16 @@
 		).filter((s: any) => s.enabled || s.url === $selectedTerminalId);
 
 		// Fetch terminal servers the user has access to (for FileNav + terminal_id)
-		const systemTerminals = await getTerminalServers(localStorage.token);
+		const systemTerminals = await Promise.all(
+			(await getTerminalServers(localStorage.token)).map(async (terminal) => ({
+				...terminal,
+				features: terminal.features ??
+					(await getTerminalConfig(
+						`${WEBUI_API_BASE_URL}/terminals/${terminal.id}`,
+						localStorage.token
+					).catch(() => null))?.features ?? {}
+			}))
+		);
 		terminalServers.set([
 			...(enabledTerminals.length > 0
 				? (
@@ -162,6 +171,7 @@
 				name: t.name,
 				key: localStorage.token,
 				contexts: t.contexts ?? {},
+				features: t.features,
 				config: t.config ?? {}
 			}))
 		]);

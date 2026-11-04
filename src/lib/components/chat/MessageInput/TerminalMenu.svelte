@@ -31,7 +31,8 @@
 		(t) =>
 			t.id &&
 			chatContext(t) !== false &&
-			!(isTemporaryChatId($activeChatId) && chatContext(t)?.context_id === 'chat_id')
+			!(isTemporaryChatId($activeChatId) && chatContext(t)?.context_id === 'chat_id' &&
+				t.features?.workspace_isolation !== true)
 	);
 	$: directTerminals = (
 		$config?.features?.enable_direct_integrations ? ($settings?.terminalServers ?? []) : []
