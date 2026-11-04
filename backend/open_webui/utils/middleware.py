@@ -209,6 +209,8 @@ def _is_tool_result_error(value: Any) -> bool:
         return has_error or (
             bool(message.strip()) if isinstance(message, str) else isinstance(message, (dict, list)) and bool(message)
         )
+    if isinstance(parsed.get('images'), list) and 'result' in parsed:
+        return _is_tool_result_error(parsed['result'])
 
     return False
 
@@ -745,8 +747,10 @@ async def process_tool_result(
     direct_tool=False,
     metadata=None,
     user=None,
+    tool_params=None,
 ):
     tool_result_embeds = []
+    tool_response_headers = {}
     if isinstance(tool_result, MCPAppResult):
         tool_result_embeds.append(tool_result.embed)
         tool_result = tool_result.context
@@ -863,7 +867,7 @@ async def process_tool_result(
     # tool_result_files and replace tool_result with a text summary.
     if isinstance(tool_result, str) and tool_result.startswith('data:image/'):
         tool_result_files.append({'type': 'image', 'url': tool_result})
-        tool_result = f'{tool_function_name}: Image file read successfully.'
+        tool_result = f'{tool_function_name}: 图片已读取。'
 
     if isinstance(tool_result, list):
         if tool_type == 'mcp':  # MCP
@@ -936,6 +940,28 @@ async def process_tool_result(
                     tool_result.remove(item)
 
     tool_result = extract_base64_images(tool_result, tool_result_files)
+
+    # Preserve source identity when binary or MCP images are separated from tool text.
+    image_files = [item for item in tool_result_files if item.get('type') == 'image']
+    if image_files:
+        response_headers = {str(key).lower(): value for key, value in tool_response_headers.items()}
+        source_path = unquote(response_headers.get('x-file-path', '')) or (tool_params or {}).get('path')
+        image_sources = []
+        for index, item in enumerate(image_files, 1):
+            source = {'tool': tool_function_name, 'image_index': index}
+            if isinstance(source_path, str) and source_path:
+                source['path'] = source_path
+                item.setdefault('name', os.path.basename(source_path))
+            for header, field in (
+                ('x-file-size', 'size_bytes'),
+                ('x-image-width', 'preview_width'),
+                ('x-image-height', 'preview_height'),
+            ):
+                value = response_headers.get(header, '')
+                if isinstance(value, str) and value.isdecimal():
+                    source[field] = int(value)
+            image_sources.append(source)
+        tool_result = {'result': tool_result, 'images': image_sources}
 
     if isinstance(tool_result, list):
         tool_result = {'results': tool_result}
@@ -1174,6 +1200,7 @@ async def chat_completion_tools_handler(
                     direct_tool,
                     metadata,
                     user,
+                    tool_params=tool_function_params,
                 )
 
                 file_result = parse_terminal_tool_result(tool_result)
@@ -3346,7 +3373,7 @@ async def resume_tool_calls(request, form_data, user, model, metadata, message) 
                 if terminal_file_result:
                     result = terminal_file_result
                 result, files, embeds = await process_tool_result(
-                    request, name, result, tool_type, direct_tool, metadata, user
+                    request, name, result, tool_type, direct_tool, metadata, user, tool_params=params
                 )
                 await terminal_event_handler(name, params, result, event_emitter)
                 citations_enabled = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get(
@@ -5882,6 +5909,7 @@ async def streaming_chat_response_handler(response, ctx):
                             direct_tool,
                             metadata,
                             user,
+                            tool_params=tool_function_params,
                         )
 
                         await terminal_event_handler(
@@ -6033,19 +6061,6 @@ async def streaming_chat_response_handler(response, ctx):
                                 flatten_tool_images=True,
                             )
 
-                            # Chat Completions providers don't support multimodal
-                            # tool messages.  Extract images into a user message.
-                            image_urls = []
-                            for message in tool_messages:
-                                if message.get('role') == 'tool' and isinstance(message.get('content'), list):
-                                    text_parts = []
-                                    for part in message['content']:
-                                        if part.get('type') == 'input_text':
-                                            text_parts.append(part.get('text', ''))
-                                        elif part.get('type') == 'input_image':
-                                            image_urls.append(part.get('image_url', ''))
-                                    message['content'] = ''.join(text_parts)
-
                             if current_usage and tool_messages:
                                 tool_messages[0]['usage'] = current_usage
 
@@ -6059,20 +6074,6 @@ async def streaming_chat_response_handler(response, ctx):
                                 *[message for message in messages if message.get('role') != 'system'],
                                 *tool_messages,
                             ]
-
-                            if image_urls:
-                                messages.append(
-                                    {
-                                        'role': 'user',
-                                        'content': [
-                                            {
-                                                'type': 'text',
-                                                'text': 'Here are the images from the tool results above. Please analyze them.',
-                                            },
-                                            *[{'type': 'image_url', 'image_url': {'url': url}} for url in image_urls],
-                                        ],
-                                    }
-                                )
 
                             # Use the existing checkpoint format internally and strip it from the provider payload.
                             def get_request_messages(messages: list[dict]) -> list[dict]:

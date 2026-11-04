@@ -394,11 +394,17 @@ def convert_output_to_messages(
         return []
 
     messages = []
+    output_function_calls = {
+        item.get('call_id'): item
+        for item in output
+        if isinstance(item, dict) and item.get('type') == 'function_call'
+    }
     pending_tool_calls = []
     pending_content = []
     pending_reasoning = []  # Only populated for top-level structured reasoning fields.
     pending_reasoning_details = []
-    pending_tool_image_urls = []
+    pending_tool_image_parts = []
+    pending_tool_image_results = []
     pending_tool_outputs = []
 
     def flush_pending():
@@ -428,37 +434,34 @@ def convert_output_to_messages(
         pending_reasoning_details = []
 
     def flush_tool_images():
-        nonlocal pending_tool_image_urls
-        if not pending_tool_image_urls:
-            return
-
-        messages.append(
-            {
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'text',
-                        'text': 'Here are the images from the tool results above. Please analyze them.',
-                    },
-                    *[{'type': 'image_url', 'image_url': {'url': url}} for url in pending_tool_image_urls],
-                ],
-            }
-        )
-        pending_tool_image_urls = []
+        nonlocal pending_tool_image_parts, pending_tool_image_results
+        if pending_tool_image_parts:
+            messages.append(
+                {
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': '工具结果图片对应关系：' + JSONCodec.dumps(pending_tool_image_results, ensure_ascii=False),
+                        },
+                        *pending_tool_image_parts,
+                    ],
+                }
+            )
+        pending_tool_image_parts = []
+        pending_tool_image_results = []
 
     def flush_tool_outputs():
         nonlocal pending_tool_outputs
         if not pending_tool_outputs:
             return
 
-        known_call_ids = {call['id'] for call in pending_tool_calls}
-        known_call_ids.update(
-            call['id'] for message in messages for call in message.get('tool_calls', [])
-        )
+        known_calls = {call['id']: call for message in messages for call in message.get('tool_calls', [])}
+        known_calls.update({call['id']: call for call in pending_tool_calls})
         pending_tool_outputs = [
             result
             for result in pending_tool_outputs
-            if result.get('call_id') in known_call_ids
+            if result.get('call_id') in known_calls
         ]
         flush_pending()
         for output_item in pending_tool_outputs:
@@ -482,7 +485,26 @@ def convert_output_to_messages(
                         'content': content,
                     }
                 )
-                pending_tool_image_urls.extend(image_urls)
+                call_id = output_item.get('call_id', '')
+                provider_function = known_calls.get(call_id, {}).get('function', {})
+                output_call = output_function_calls.get(call_id, {})
+                function = {
+                    'name': output_call.get('name') or provider_function.get('name', ''),
+                    'arguments': output_call.get('arguments', provider_function.get('arguments', '{}')),
+                }
+                source = {'call_id': call_id, 'tool': function.get('name', ''), 'status': output_item.get('status', 'completed'), 'image_count': len(image_urls)}
+                try:
+                    arguments = JSONCodec.loads(function.get('arguments', '{}'))
+                except (JSONCodec.JSONDecodeError, TypeError):
+                    arguments = {}
+                if isinstance(arguments, dict) and isinstance(arguments.get('path'), str):
+                    source['path'] = arguments['path']
+                pending_tool_image_results.append(source)
+                for index, url in enumerate(image_urls, 1):
+                    pending_tool_image_parts.extend([
+                        {'type': 'text', 'text': JSONCodec.dumps({**source, 'image_index': index}, ensure_ascii=False)},
+                        {'type': 'image_url', 'image_url': {'url': url}},
+                    ])
             elif image_urls:
                 messages.append(
                     {

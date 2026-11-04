@@ -1610,7 +1610,9 @@ async def get_terminal_tools(
         'list_files', 'grep_search', 'match_files', 'search_files', 'glob_search',
     }
     directory_hint = (
-        'Use paths relative to this session working directory for workspace files. '
+        'Relative file paths and the default command cwd use the current session working directory. '
+        'Each run_command call starts an independent shell; cd within a command does not change later calls. '
+        'The directory can change through the file browser; use returned absolute paths to keep references stable. '
         'Do not assume /mnt/data exists or is writable; use the reported directory or run pwd when unknown.'
     )
     if terminal_cwd:

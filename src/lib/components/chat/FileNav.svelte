@@ -1036,7 +1036,7 @@
 	// Directory operations
 	const loadDir = async (
 		path: string,
-		options: { preserveTree?: boolean; restoreTree?: boolean } = {}
+		options: { preserveTree?: boolean; restoreTree?: boolean; syncCwd?: boolean } = {}
 	) => {
 		if (disposed) return;
 		if (!(await protectBuffer())) return;
@@ -1094,7 +1094,7 @@
 			error = failure;
 			entries = [];
 		} else {
-			if (!initialFile) void setCwd(terminal.url, terminal.key, directory, session ?? undefined);
+			if (!initialFile && options.syncCwd !== false) void setCwd(terminal.url, terminal.key, directory, session ?? undefined);
 			currentWritable = result.writable !== false;
 			entries = normalizeEntries(result.entries);
 			treeCache = new Map(treeCache).set(directory, entries);
@@ -1126,7 +1126,7 @@
 	};
 
 	const refreshBrowser = async () => {
-		await loadDir(currentPath, { preserveTree: true });
+		await loadDir(currentPath, { preserveTree: true, syncCwd: false });
 		await refreshExpandedDirs();
 	};
 
@@ -1181,7 +1181,7 @@
 		if (!(await protectBuffer())) return;
 		const filePath = fullPath;
 		if (parentPath !== currentPath) {
-			await loadDir(parentPath);
+			await loadDir(parentPath, { syncCwd: false });
 		}
 		selectedFileWritable = entry.writable !== false;
 		pushNavHistory(parentPath, filePath);
@@ -1922,7 +1922,7 @@
 			const file = initialFile;
 			const path = normalizePath(file.path);
 			const slash = path.lastIndexOf('/');
-			await loadDir(slash > 0 ? path.slice(0, slash + 1) : '/');
+			await loadDir(slash > 0 ? path.slice(0, slash + 1) : '/', { syncCwd: false });
 			if (disposed || loadGeneration !== generation + 1 || selector !== effectiveTerminalId ||
 				session !== chatId || !selectedTerminal) return;
 			await openEntry(
@@ -1932,7 +1932,7 @@
 				{ page: file.page }
 			);
 		} else {
-			await loadDir(initialDirectory ?? savedPath, { restoreTree: true });
+			await loadDir(initialDirectory ?? savedPath, { restoreTree: true, syncCwd: false });
 		}
 	};
 
@@ -1947,7 +1947,7 @@
 			const targetPage = typeof request === 'string' ? null : request.page;
 			filePath = normalizePath(filePath);
 			if (!isInsideFileRoot(filePath)) {
-				await loadDir(fileRoot?.path ?? '/');
+				await loadDir(fileRoot?.path ?? '/', { syncCwd: false });
 				return;
 			}
 
@@ -1959,7 +1959,7 @@
 			if (!(await protectBuffer())) return;
 			const selector = effectiveTerminalId,
 				session = chatId;
-			await loadDir(dir);
+			await loadDir(dir, { syncCwd: false });
 			if (selector !== effectiveTerminalId || session !== chatId || currentPath !== dir || dirty)
 				return;
 			await tick();
@@ -2018,7 +2018,7 @@
 				!terminalChatContextPending &&
 				!loading
 			) {
-				loadDir(currentPath, { preserveTree: true });
+				loadDir(currentPath, { preserveTree: true, syncCwd: false });
 			}
 		};
 
@@ -2639,7 +2639,7 @@
 				{:else if error}
 					<div class="p-4 text-xs">
 						<Tooltip content={error}>
-							<button type="button" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300" on:click={() => void loadDir(currentPath)}>
+							<button type="button" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300" on:click={() => void loadDir(currentPath, { syncCwd: false })}>
 								目录加载失败，点击重试
 							</button>
 						</Tooltip>
