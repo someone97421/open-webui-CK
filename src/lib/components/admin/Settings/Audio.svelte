@@ -51,6 +51,9 @@
 	};
 	let REALTIME_INPUT_PARAMS = '';
 
+let CALL_ENABLED = true;
+let STT_ENABLED = true;
+
 	// Audio
 	let TTS_OPENAI_API_BASE_URL = '';
 	let TTS_OPENAI_API_KEY = '';
@@ -181,6 +184,9 @@
 				INPUT_PARAMS: realtimeInputParams,
 				REALTIME_CALL_PROMPT_TEMPLATE: (realtime.REALTIME_CALL_PROMPT_TEMPLATE ?? '').trim() || null
 			},
+			call: {
+				ENABLED: CALL_ENABLED
+			},
 			tts: {
 				OPENAI_API_BASE_URL: TTS_OPENAI_API_BASE_URL,
 				OPENAI_API_KEY: TTS_OPENAI_API_KEY,
@@ -198,6 +204,7 @@
 				SPLIT_ON: TTS_SPLIT_ON
 			},
 			stt: {
+				ENABLED: STT_ENABLED,
 				OPENAI_API_BASE_URL: STT_OPENAI_API_BASE_URL,
 				OPENAI_API_KEY: STT_OPENAI_API_KEY,
 				OPENAI_API_REQUEST_FORMAT: STT_OPENAI_API_REQUEST_FORMAT,
@@ -260,6 +267,8 @@
 			REALTIME_INPUT_PARAMS = res.realtime?.INPUT_PARAMS
 				? JSON.stringify(res.realtime.INPUT_PARAMS, null, 2)
 				: '';
+			CALL_ENABLED = res.call?.ENABLED ?? true;
+			STT_ENABLED = res.stt.ENABLED ?? true;
 			STT_OPENAI_API_BASE_URL = res.stt.OPENAI_API_BASE_URL;
 			STT_OPENAI_API_KEY = res.stt.OPENAI_API_KEY;
 			STT_OPENAI_API_REQUEST_FORMAT = res.stt.OPENAI_API_REQUEST_FORMAT || 'multipart';
@@ -304,6 +313,13 @@
 
 	<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
 		<AdminSettingSection title={$i18n.t('Voice calls')} first>
+			<AdminSettingRow
+				label={$i18n.t('settings.admin.audio.voiceMode.label')}
+				description={$i18n.t('settings.admin.audio.voiceMode.description')}
+				let:labelId
+			>
+				<Switch bind:state={CALL_ENABLED} ariaLabelledbyId={labelId} />
+			</AdminSettingRow>
 			<AdminSettingRow label={$i18n.t('Call mode')}>
 				<SettingsSelect bind:value={realtime.ENABLED} ariaLabel={$i18n.t('Call mode')}>
 					<option value={false}>{$i18n.t('Standard')}</option>
@@ -420,6 +436,13 @@
 		</AdminSettingSection>
 
 		<AdminSettingSection title={$i18n.t('settings.admin.audio.sections.speechToText.title')}>
+			<AdminSettingRow
+				label={$i18n.t('settings.admin.audio.voiceInput.label')}
+				description={$i18n.t('settings.admin.audio.voiceInput.description')}
+				let:labelId
+			>
+				<Switch bind:state={STT_ENABLED} ariaLabelledbyId={labelId} />
+			</AdminSettingRow>
 			<AdminSettingRow
 				label={$i18n.t('settings.admin.audio.speechToTextEngine.label')}
 				description={$i18n.t('settings.admin.audio.speechToTextEngine.description')}

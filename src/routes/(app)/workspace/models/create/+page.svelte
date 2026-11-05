@@ -36,11 +36,7 @@
 					// LICENSE covers this Open WebUI fallback logo.
 					// Do not alter, remove, obscure, or replace it except as LICENSE permits:
 					// https://docs.openwebui.com/license.
-					profile_image_url:
-						modelInfo.meta.profile_image_url ?? `${WEBUI_BASE_URL}/static/favicon.png`,
-					suggestion_prompts: modelInfo.meta.suggestion_prompts
-						? modelInfo.meta.suggestion_prompts.filter((prompt) => prompt.content !== '')
-						: null
+					profile_image_url: modelInfo.meta.profile_image_url ?? `${WEBUI_BASE_URL}/static/favicon.png`
 				},
 				params: { ...modelInfo.params }
 			}).catch((error) => {

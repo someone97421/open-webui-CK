@@ -379,7 +379,8 @@ type Document = {
 type Config = {
 	audio?: {
 		realtime?: { enabled: boolean; model: string; voice: string };
-		stt: { engine: string };
+		call?: { enabled: boolean };
+		stt: { enabled: boolean; engine: string };
 		tts: { engine: string; voice: string; split_on: string };
 	};
 	license_metadata: any;
@@ -391,8 +392,6 @@ type Config = {
 	i18n?: I18nOverrides;
 	default_models: string;
 	default_pinned_models?: string | null;
-	default_prompt_suggestions: PromptSuggestion[] | null;
-	default_prompt_suggestions_i18n?: Record<string, { suggestion_prompts: PromptSuggestion[] }>;
 	features: {
 		enable_encrypted_channels?: boolean;
 		slim?: boolean;
@@ -456,10 +455,6 @@ type Config = {
 	};
 };
 
-type PromptSuggestion = {
-	content: string;
-	title: [string, string];
-};
 
 export type SessionUser = {
 	permissions: any;

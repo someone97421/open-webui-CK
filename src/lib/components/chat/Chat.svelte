@@ -1185,19 +1185,6 @@
 		messageInput?.focus({ preventScroll: true });
 	};
 
-	const onSelect = async (e) => {
-		const { type, data } = e;
-
-		if (type === 'prompt') {
-			// Handle prompt selection
-			messageInput?.setTextHandler(data, async () => {
-				if (!($settings?.insertSuggestionPrompt ?? false)) {
-					await tick();
-					submitHandler(prompt);
-				}
-			});
-		}
-	};
 
 	$: if (selectedModels && chatIdProp !== '') {
 		saveSessionSelectedModels();
@@ -2752,6 +2739,8 @@
 
 	const openCallOverlay = () => {
 		if (isShared) return;
+
+		if (!($config?.audio?.call?.enabled ?? true)) return;
 
 		if (!($user?.role === 'admin' || ($user?.permissions?.chat?.call ?? true))) {
 			return;
@@ -5753,7 +5742,6 @@
 										forkHandler={$temporaryChatEnabled ? null : handleForkChat}
 										topPadding={!embedded && !fullWidthTabs}
 										bottomPadding={files.length > 0}
-										{onSelect}
 										{onInsertToNote}
 									/>
 								</div>
@@ -5980,7 +5968,6 @@
 									{oauthRedirectHandler}
 									{stopResponse}
 									{createMessagePair}
-									{onSelect}
 									{onUpload}
 									{onUpdate}
 									messageQueue={$chatRequestQueues[$chatId] ?? []}

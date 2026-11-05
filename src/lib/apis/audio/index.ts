@@ -40,10 +40,15 @@ export type RealtimeConfig = {
 	REALTIME_CALL_PROMPT_TEMPLATE: string | null;
 };
 
+export type CallConfig = {
+	ENABLED: boolean;
+};
+
 type AudioConfigForm = {
 	tts: Record<string, unknown>;
 	stt: Record<string, unknown>;
 	realtime?: Partial<RealtimeConfig>;
+	call?: Partial<CallConfig>;
 };
 
 export const updateAudioConfig = async (token: string, payload: AudioConfigForm) => {

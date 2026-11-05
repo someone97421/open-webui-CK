@@ -23,13 +23,10 @@
 	import { isArchivedProject } from '$lib/utils/projects';
 	import {
 		resolveLocalizedModelDescription,
-		resolveLocalizedModelName,
-		resolveLocalizedModelPromptSuggestions,
-		resolveLocalizedPromptSuggestions
+		resolveLocalizedModelName
 	} from '$lib/utils/localizedContent';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 
-	import Suggestions from './Suggestions.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import EyeSlash from '$lib/components/icons/EyeSlash.svelte';
 	import MessageInput from './MessageInput.svelte';
@@ -76,7 +73,6 @@
 
 	export let onUpload: Function = (e) => {};
 	export let onUpdate: (data?: { file?: any }) => void = () => {};
-	export let onSelect = (e) => {};
 	export let onChange = (e) => {};
 	export let onWebSearchToggle: Function = () => {};
 	export let messageQueue: { id: string; prompt: string; files: any[] }[] = [];
@@ -99,7 +95,6 @@
 	let selectedModel;
 	let selectedModelName = '';
 	let selectedModelDescription = '';
-	let selectedSuggestionPrompts = [];
 
 	$: models = selectedModels.map((id) => $_models.find((m) => m.id === id));
 	$: selectedModel = atSelectedModel ?? models[selectedModelIdx];
@@ -107,15 +102,6 @@
 	$: selectedModelDescription =
 		$config?.license_metadata?.chat_placeholder_description ||
 		resolveLocalizedModelDescription(selectedModel, $i18n.language);
-	$: selectedSuggestionPrompts =
-		resolveLocalizedModelPromptSuggestions(atSelectedModel, $i18n.language) ??
-		resolveLocalizedModelPromptSuggestions(models[selectedModelIdx], $i18n.language) ??
-		resolveLocalizedPromptSuggestions(
-			$config?.default_prompt_suggestions,
-			$config?.default_prompt_suggestions_i18n ?? {},
-			$i18n.language,
-			(key) => $i18n.t(key)
-		);
 
 	// Shared folders without write access and archived projects are read-only.
 	$: folderReadOnly =
@@ -312,12 +298,6 @@
 	{#if $selectedFolder}
 		<div class="mx-auto px-4 md:max-w-3xl md:px-6 min-h-62" in:fade={{ duration: 200, delay: 200 }}>
 			<FolderPlaceholder folder={$selectedFolder} readOnly={folderReadOnly} />
-		</div>
-	{:else}
-		<div class="mx-auto max-w-2xl mt-2" in:fade={{ duration: 200, delay: 200 }}>
-			<div class="mx-5">
-				<Suggestions suggestionPrompts={selectedSuggestionPrompts} inputValue={prompt} {onSelect} />
-			</div>
 		</div>
 	{/if}
 </div>

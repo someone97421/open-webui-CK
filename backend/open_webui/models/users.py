@@ -83,7 +83,6 @@ class InterfaceSettings(BaseModel):
     showFormattingToolbar: bool | None = None
     insertPromptAsRichText: bool | None = None
     promptAutocomplete: bool | None = None
-    insertSuggestionPrompt: bool | None = None
     keepFollowUpPrompts: bool | None = None
     insertFollowUpPrompt: bool | None = None
     regenerateMenu: bool | None = None

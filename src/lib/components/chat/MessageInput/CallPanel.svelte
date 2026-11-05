@@ -24,6 +24,10 @@
 	};
 
 	onMount(() => {
+		if (!($config?.audio?.call?.enabled ?? true)) {
+			close();
+			return;
+		}
 		callMode =
 			bridge?.connected || bridge?.connecting || $config?.audio?.realtime?.enabled
 				? 'bridge'
@@ -37,6 +41,8 @@
 		}
 		started = true;
 	});
+
+	$: if (started && !($config?.audio?.call?.enabled ?? true)) close();
 
 	$: if (
 		started &&

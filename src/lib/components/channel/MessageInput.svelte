@@ -95,6 +95,7 @@
 	let shiftKey = false;
 
 	let recording = false;
+	$: if (!($config?.audio?.stt?.enabled ?? true)) recording = false;
 	let content = '';
 	let inputEditor: Editor | null = null;
 	let files: any[] = [];
@@ -938,7 +939,7 @@
 			<div
 				class="{disabled ? 'opacity-50 pointer-events-none cursor-not-allowed' : ''} relative z-20"
 			>
-				{#if recording}
+				{#if recording && ($config?.audio?.stt?.enabled ?? true)}
 					<VoiceRecording
 						bind:recording
 						onCancel={async () => {
@@ -1250,7 +1251,7 @@
 								</div>
 
 								<div class="flex items-center gap-1 shrink-0">
-									{#if content === ''}
+									{#if content === '' && ($config?.audio?.stt?.enabled ?? true)}
 										<Tooltip content={$i18n.t('Record voice')}>
 											<button
 												id="voice-input-button"

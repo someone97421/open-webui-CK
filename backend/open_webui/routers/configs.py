@@ -923,40 +923,6 @@ async def set_subagents_config(
     return values
 
 
-class PromptSuggestion(BaseModel):
-    title: list[str]
-    content: str
-
-
-class SetDefaultSuggestionsForm(BaseModel):
-    suggestions: list[PromptSuggestion] | None
-    i18n: dict[str, Any] | None = None
-
-
-@router.post('/suggestions', response_model=dict)
-async def set_default_suggestions(
-    request: Request,
-    form_data: SetDefaultSuggestionsForm,
-    user=Depends(get_admin_user),
-):
-    data = form_data.model_dump()
-    await Config.upsert(
-        {
-            'ui.prompt_suggestions': data['suggestions'],
-            'ui.prompt_suggestions_i18n': data.get('i18n') or {},
-        }
-    )
-    suggestions = await Config.get('ui.prompt_suggestions')
-    suggestions_i18n = await Config.get('ui.prompt_suggestions_i18n')
-    await publish_event(
-        request,
-        EVENTS.CONFIG_SUGGESTIONS_UPDATED,
-        actor=user,
-        subject_id='ui.prompt_suggestions',
-        subject_type='config',
-        data={'count': len(suggestions or [])},
-    )
-    return {'suggestions': suggestions, 'i18n': suggestions_i18n}
 
 
 # Set Banners

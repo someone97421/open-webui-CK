@@ -1574,6 +1574,9 @@ DEEPGRAM_API_KEY = os.getenv('DEEPGRAM_API_KEY', '')
 # ElevenLabs configuration
 ELEVENLABS_API_BASE_URL = os.getenv('ELEVENLABS_API_BASE_URL', 'https://api.elevenlabs.io')
 
+AUDIO_STT_ENABLED = os.getenv('AUDIO_STT_ENABLED', 'True').lower() == 'true'
+AUDIO_CALL_ENABLED = os.getenv('AUDIO_CALL_ENABLED', 'True').lower() == 'true'
+
 AUDIO_STT_OPENAI_API_BASE_URL = os.getenv('AUDIO_STT_OPENAI_API_BASE_URL', OPENAI_API_BASE_URL)
 
 AUDIO_STT_OPENAI_API_KEY = os.getenv('AUDIO_STT_OPENAI_API_KEY', OPENAI_API_KEY)
@@ -1689,14 +1692,6 @@ DEFAULT_MODELS = os.getenv('DEFAULT_MODELS', None)
 
 DEFAULT_PINNED_MODELS = os.getenv('DEFAULT_PINNED_MODELS', None)
 
-# None uses the frontend's localized defaults; an empty list disables suggestions.
-try:
-    DEFAULT_PROMPT_SUGGESTIONS = JSONCodec.loads(os.getenv('DEFAULT_PROMPT_SUGGESTIONS', 'null'))
-except Exception as e:
-    log.exception(f'Error loading DEFAULT_PROMPT_SUGGESTIONS: {e}')
-    DEFAULT_PROMPT_SUGGESTIONS = None
-
-DEFAULT_PROMPT_SUGGESTIONS_I18N = {}
 
 try:
     model_order_list = JSONCodec.loads(os.getenv('MODEL_ORDER_LIST', '[]'))
@@ -3168,6 +3163,8 @@ DEFAULT_CONFIG = {
     'images.edit.comfyui.api_key': IMAGES_EDIT_COMFYUI_API_KEY,
     'images.edit.comfyui.workflow': IMAGES_EDIT_COMFYUI_WORKFLOW,
     'images.edit.comfyui.nodes': IMAGES_EDIT_COMFYUI_WORKFLOW_NODES,
+    'audio.stt.enabled': AUDIO_STT_ENABLED,
+    'audio.call.enabled': AUDIO_CALL_ENABLED,
     'audio.stt.whisper_model': WHISPER_MODEL,
     'audio.stt.deepgram.api_key': DEEPGRAM_API_KEY,
     'audio.stt.openai.api_base_url': AUDIO_STT_OPENAI_API_BASE_URL,
@@ -3219,8 +3216,6 @@ DEFAULT_CONFIG = {
     'ui.default_interface_settings': DEFAULT_INTERFACE_SETTINGS,
     'ui.visibility': UI_VISIBILITY,
     'ui.i18n': {},
-    'ui.prompt_suggestions': DEFAULT_PROMPT_SUGGESTIONS,
-    'ui.prompt_suggestions_i18n': DEFAULT_PROMPT_SUGGESTIONS_I18N,
     'ui.model_order_list': MODEL_ORDER_LIST,
     'models.default_metadata': DEFAULT_MODEL_METADATA,
     'models.default_params': DEFAULT_MODEL_PARAMS,

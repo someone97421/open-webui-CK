@@ -9,7 +9,10 @@
 	const labelId = `admin-setting-${uuidv4()}`;
 </script>
 
-<div class="group/setting-row flex items-center justify-between gap-4 {className}">
+<div
+	class="group/setting-row flex items-center justify-between gap-4 {className}"
+	data-settings-search-target={label || undefined}
+>
 	<label
 		for={`${labelId}-control`}
 		id={labelId}

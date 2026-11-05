@@ -8,13 +8,10 @@
 
 	import { blur, fade } from 'svelte/transition';
 
-	import Suggestions from './Suggestions.svelte';
 	import { sanitizeResponseContent } from '$lib/utils';
 	import {
 		resolveLocalizedModelDescription,
-		resolveLocalizedModelName,
-		resolveLocalizedModelPromptSuggestions,
-		resolveLocalizedPromptSuggestions
+		resolveLocalizedModelName
 	} from '$lib/utils/localizedContent';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import EyeSlash from '$lib/components/icons/EyeSlash.svelte';
@@ -25,14 +22,12 @@
 	export let models = [];
 	export let atSelectedModel;
 
-	export let onSelect = (e) => {};
 
 	let mounted = false;
 	let selectedModelIdx = 0;
 	let selectedModel;
 	let selectedModelName = '';
 	let selectedModelDescription = '';
-	let selectedSuggestionPrompts = [];
 
 	$: if (modelIds.length > 0) {
 		selectedModelIdx = models.length - 1;
@@ -44,15 +39,6 @@
 	$: selectedModelDescription =
 		$config?.license_metadata?.chat_placeholder_description ||
 		resolveLocalizedModelDescription(selectedModel, $i18n.language);
-	$: selectedSuggestionPrompts =
-		resolveLocalizedModelPromptSuggestions(atSelectedModel, $i18n.language) ??
-		resolveLocalizedModelPromptSuggestions(models[selectedModelIdx], $i18n.language) ??
-		resolveLocalizedPromptSuggestions(
-			$config?.default_prompt_suggestions,
-			$config?.default_prompt_suggestions_i18n ?? {},
-			$i18n.language,
-			(key) => $i18n.t(key)
-		);
 
 	onMount(() => {
 		mounted = true;
@@ -161,12 +147,5 @@
 			</div>
 		</div>
 
-		<div class=" w-full" in:fade={{ duration: 200, delay: 300 }}>
-			<Suggestions
-				className="grid grid-cols-2"
-				suggestionPrompts={selectedSuggestionPrompts}
-				{onSelect}
-			/>
-		</div>
 	</div>
 {/key}

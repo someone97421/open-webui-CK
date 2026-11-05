@@ -99,11 +99,6 @@ class EventDefinitions(BaseModel):
     CONFIG_BANNERS_UPDATED: EventDefinition = EventDefinition(
         name='config.banners.updated', description='Banner configuration was updated.', message='Config Banners updated'
     )
-    CONFIG_SUGGESTIONS_UPDATED: EventDefinition = EventDefinition(
-        name='config.suggestions.updated',
-        description='Suggestion configuration was updated.',
-        message='Config Suggestions updated',
-    )
     AUTH_SIGNUP: EventDefinition = EventDefinition(
         name='auth.signup', description='A user account was created through signup.', message='User signed up'
     )

@@ -75,7 +75,6 @@
 
 	let largeTextAsFile = false;
 
-	let insertSuggestionPrompt = false;
 	let keepFollowUpPrompts = false;
 	let insertFollowUpPrompt = false;
 
@@ -358,7 +357,6 @@
 		insertPromptAsRichText = currentSettings?.insertPromptAsRichText ?? false;
 		promptAutocomplete = currentSettings?.promptAutocomplete ?? false;
 
-		insertSuggestionPrompt = currentSettings?.insertSuggestionPrompt ?? false;
 		keepFollowUpPrompts = currentSettings?.keepFollowUpPrompts ?? false;
 		insertFollowUpPrompt = currentSettings?.insertFollowUpPrompt ?? false;
 
@@ -1300,32 +1298,6 @@
 		</p>
 	</div>
 
-	<div>
-		<div class={settingRowClass}>
-			<label
-				id="insert-suggestion-prompt-label"
-				class={settingLabelClass}
-				for="insert-suggestion-prompt-label-control"
-			>
-				{$i18n.t('settings.personal.interface.insertSuggestionPromptToInput.label')}
-			</label>
-
-			<div class={settingControlClass}>
-				<Switch
-					ariaLabelledbyId="insert-suggestion-prompt-label"
-					tooltip={true}
-					bind:state={insertSuggestionPrompt}
-					inherited={isDefaultSetting('insertSuggestionPrompt')}
-					on:change={() => {
-						saveSettings({ insertSuggestionPrompt });
-					}}
-				/>
-			</div>
-		</div>
-		<p class={settingDescriptionClass}>
-			{$i18n.t('settings.personal.interface.insertSuggestionPromptToInput.description')}
-		</p>
-	</div>
 
 	<div>
 		<div class={settingRowClass}>

@@ -22,8 +22,9 @@ export const canUseTemporaryChats = ({ user }: SettingsAccessContext) =>
 export const canUseChannels = ({ user, config }: SettingsAccessContext) =>
 	config?.features?.enable_channels &&
 	(user?.role === 'admin' || (user?.permissions?.features?.channels ?? true));
-export const canUseCalls = ({ user }: SettingsAccessContext) =>
-	user?.role === 'admin' || (user?.permissions?.chat?.call ?? true);
+export const canUseCalls = ({ user, config }: SettingsAccessContext) =>
+	(config?.audio?.call?.enabled ?? true) &&
+	(user?.role === 'admin' || (user?.permissions?.chat?.call ?? true));
 export const canUseWebSearch = ({ user, config }: SettingsAccessContext) =>
 	config?.features?.enable_web_search &&
 	(user?.role === 'admin' || user?.permissions?.features?.web_search);
@@ -95,6 +96,15 @@ export function canSearchSetting(
 		/\.(sections\.voice|allowVoiceInterruptionInCall|displayEmojiInCall)\./.test(key)
 	)
 		return canUseCalls(context);
+	if (
+		!(context.config?.audio?.stt?.enabled ?? true) &&
+		(/^settings\.personal\.audio\.(sections\.sttSettings|speechToTextEngine|language|instantAutoSendAfterVoiceTranscription)\./.test(
+			key
+		) ||
+			stem === 'settings.personal.shortcuts.toggleDictation')
+	)
+		return false;
+	if (stem === 'settings.personal.shortcuts.toggleMute') return canUseCalls(context);
 	if (stem === 'settings.personal.interface.webSearchInChat') return !!canUseWebSearch(context);
 	if (stem === 'settings.personal.shortcuts.newTemporaryChat')
 		return !!canUseTemporaryChats(context);

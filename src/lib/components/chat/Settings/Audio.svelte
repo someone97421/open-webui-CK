@@ -182,6 +182,7 @@
 	</h2>
 
 	<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
+		{#if $config?.audio?.stt?.enabled ?? true}
 		<UserSettingSection title={$i18n.t('settings.personal.audio.sections.sttSettings.title')} first>
 			{#if $config.audio.stt.engine !== 'web'}
 				{#if $visibleControls['settings.speech_to_text_engine']}
@@ -240,6 +241,7 @@
 				/>
 			</UserSettingRow>
 		</UserSettingSection>
+		{/if}
 
 		<UserSettingSection title={$i18n.t('settings.personal.audio.sections.ttsSettings.title')}>
 			{#if $visibleControls['settings.text_to_speech_engine']}

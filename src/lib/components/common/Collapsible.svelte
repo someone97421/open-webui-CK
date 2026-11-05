@@ -52,7 +52,7 @@
 	const collapsibleId = uuidv4();
 </script>
 
-<div {id} class={className}>
+<div {id} class={className} data-settings-collapsible>
 	{#if title !== null}
 		<button
 			type="button"

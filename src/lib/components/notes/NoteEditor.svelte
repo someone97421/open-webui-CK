@@ -337,6 +337,7 @@
 	let selectedModelId = null;
 
 	let recording = false;
+	$: if (!($config?.audio?.stt?.enabled ?? true)) recording = false;
 	let displayMediaRecord = false;
 
 	let showNoteChat = false;
@@ -1255,7 +1256,7 @@ ${content}
 									</button>
 								</Tooltip>
 
-								{#if note?.write_access}
+								{#if note?.write_access && ($config?.audio?.stt?.enabled ?? true)}
 									<RecordMenu
 										onRecord={async () => {
 											displayMediaRecord = false;

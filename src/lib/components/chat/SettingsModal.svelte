@@ -2,6 +2,8 @@
 	import english from '$lib/i18n/locales/en-US/translation.json';
 	import {
 		buildSettingsSearchIndex,
+		getSettingsSearchMatch,
+		normalizeSettingsSearch,
 		searchSettingsTabs,
 		type SettingsTab
 	} from '$lib/utils/settings-search';
@@ -448,9 +450,120 @@
 	$: filteredPersonalSettings = filteredSettings.filter((id) => !isAdminTab(id));
 	$: filteredAdminSettings = filteredSettings.filter(isAdminTab);
 
+	let settingsPanel: HTMLDivElement;
+	let highlightedSetting: HTMLElement | null = null;
+	let highlightedLabel: HTMLElement | null = null;
+	let searchNavigation = 0;
+	const settingHighlightClasses = [
+		'rounded-xl',
+		'bg-yellow-200/90',
+		'ring-2',
+		'ring-yellow-400',
+		'dark:bg-yellow-400/25',
+		'dark:ring-yellow-300',
+		'shadow-[0_0_0_5px_rgba(250,204,21,0.28)]'
+	];
+	const labelHighlightClasses = ['!font-bold', '!text-yellow-950', 'dark:!text-yellow-50'];
+
+	const clearSearchHighlight = () => {
+		highlightedSetting?.classList.remove(...settingHighlightClasses);
+		highlightedLabel?.classList.remove(...labelHighlightClasses);
+		highlightedSetting = null;
+		highlightedLabel = null;
+	};
+
+	const findSearchTarget = (tabId: string) => {
+		const match = getSettingsSearchMatch(searchIndex, tabId, search);
+		if (!settingsPanel || !match?.labels.length) return null;
+
+		const scoreText = (text: string) => {
+			const normalized = normalizeSettingsSearch(text);
+			if (!normalized) return 2;
+			if (match.labels.some((label) => normalized === label)) return 0;
+			if (match.labels.some((label) => normalized.includes(label) || label.includes(normalized)))
+				return 1;
+			return 2;
+		};
+
+		const markedTargets = Array.from(
+			settingsPanel.querySelectorAll<HTMLElement>('[data-settings-search-target]')
+		)
+			.map((element) => ({
+				element,
+				score: scoreText(element.getAttribute('data-settings-search-target') ?? '')
+			}))
+			.filter(({ score }) => score < 2)
+			.sort((a, b) => a.score - b.score);
+		if (markedTargets.length) {
+			return {
+				target: markedTargets[0].element,
+				label: markedTargets[0].element.querySelector<HTMLElement>('label')
+			};
+		}
+
+		const textElements = Array.from(
+			settingsPanel.querySelectorAll<HTMLElement>('label, h3, h4, p, span, div')
+		).filter(
+			(element) =>
+				(element.children.length === 0 || element.tagName === 'LABEL') &&
+				element.getClientRects().length > 0
+		);
+		const labelElement = textElements
+			.map((element) => ({ element, score: scoreText(element.textContent ?? '') }))
+			.filter(({ score }) => score < 2)
+			.sort((a, b) => a.score - b.score)[0]?.element;
+		if (!labelElement) return null;
+
+		return {
+			target:
+				labelElement.closest<HTMLElement>('[data-settings-search-target]') ??
+				labelElement.parentElement ??
+				labelElement,
+			label: labelElement
+		};
+	};
+
+	const highlightSearchResult = async (tabId: string) => {
+		const navigation = ++searchNavigation;
+		clearSearchHighlight();
+		if (!getSettingsSearchMatch(searchIndex, tabId, search)?.key) return;
+
+		await tick();
+		let result: ReturnType<typeof findSearchTarget> = null;
+		let expanded = false;
+
+		for (let attempt = 0; attempt < 40; attempt += 1) {
+			if (navigation !== searchNavigation || selectedTab !== tabId) return;
+			result = findSearchTarget(tabId);
+			if (result?.target) break;
+
+			if (!expanded) {
+				expanded = true;
+				settingsPanel
+					?.querySelectorAll<HTMLButtonElement>(
+						'[data-settings-collapsible] > button[aria-expanded="false"]:not(:disabled)'
+					)
+					.forEach((button) => button.click());
+			}
+			await new Promise<void>((resolve) => setTimeout(resolve, 100));
+		}
+
+		if (navigation !== searchNavigation || selectedTab !== tabId || !result?.target) return;
+		highlightedSetting = result.target;
+		highlightedLabel = result.label ?? null;
+		highlightedSetting.classList.add(...settingHighlightClasses);
+		highlightedLabel?.classList.add(...labelHighlightClasses);
+		highlightedSetting.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+	};
+
 	const selectTab = (id: string) => {
 		if (!availableSettings.some((tab) => tab.id === id)) return;
 		selectedTab = id;
+		if (search.trim()) void highlightSearchResult(id);
+		else {
+			searchNavigation += 1;
+			clearSearchHighlight();
+		}
 	};
 
 	const toggleSearch = async () => {
@@ -590,6 +703,10 @@
 					data-settings-search
 					class="w-full text-xs bg-transparent py-1 outline-hidden placeholder:text-gray-600 dark:text-gray-300 dark:placeholder:text-gray-500"
 					bind:value={search}
+					on:input={() => {
+						searchNavigation += 1;
+						clearSearchHighlight();
+					}}
 					id="search-input-settings-modal"
 					on:keydown={searchKeydown}
 					placeholder={$i18n.t('Search')}
@@ -846,6 +963,7 @@
 
 	<div class="flex-1 min-w-0 min-h-0 p-4 md:px-5 flex flex-col">
 		<div
+			bind:this={settingsPanel}
 			class="flex-1 min-h-0 overflow-hidden"
 			id={isAdminTab(selectedTab) ? adminTabPanelId(selectedTab) : undefined}
 		>

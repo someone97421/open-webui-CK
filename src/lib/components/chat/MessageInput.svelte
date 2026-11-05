@@ -752,6 +752,7 @@
 
 	let loaded = false;
 	let recording = false;
+	$: if (!($config?.audio?.stt?.enabled ?? true) && recording) recording = false;
 
 	let isComposing = false;
 	// Safari has a bug where compositionend is not triggered correctly #16615
@@ -947,6 +948,7 @@
 
 	let showCallButton = false;
 	$: showCallButton =
+		($config?.audio?.call?.enabled ?? true) &&
 		($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true)) &&
 		(callActive ||
 			$config?.audio?.realtime?.enabled ||
@@ -2973,7 +2975,7 @@
 										</div>
 									{:else}
 										{#if !history?.currentId || history.messages[history.currentId]?.done == true}
-											{#if $_user?.role === 'admin' || ($_user?.permissions?.chat?.stt ?? true)}
+									{#if ($config?.audio?.stt?.enabled ?? true) && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.stt ?? true))}
 												<!-- {$i18n.t('Record voice')} -->
 												<Tooltip content={$i18n.t('Dictate')}>
 													<button

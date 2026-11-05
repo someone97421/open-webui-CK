@@ -14,7 +14,7 @@
 		shortcuts
 	} from '$lib/shortcuts';
 	import type { KeybindingsMap, ShortcutDefinition } from '$lib/shortcuts';
-	import { settings, user } from '$lib/stores';
+	import { config, settings, user } from '$lib/stores';
 	import { canManageChats, canUseTemporaryChats } from '$lib/utils/settings-access';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
@@ -54,6 +54,12 @@
 				return false;
 			}
 			if (id === Shortcut.DELETE_CHAT && !canManageChats({ user: $user, config: null }, 'delete')) {
+				return false;
+			}
+			if (id === Shortcut.TOGGLE_DICTATION && !($config?.audio?.stt?.enabled ?? true)) {
+				return false;
+			}
+			if (shortcut.category === 'Voice' && !($config?.audio?.call?.enabled ?? true)) {
 				return false;
 			}
 			if (!shortcut.setting) {

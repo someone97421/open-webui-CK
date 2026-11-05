@@ -6,6 +6,7 @@
 	const i18n = getContext('i18n');
 	const dispatch = createEventDispatcher();
 
+	import { config } from '$lib/stores';
 	import Modal from '$lib/components/common/Modal.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import MicSolid from '$lib/components/icons/MicSolid.svelte';
@@ -17,6 +18,7 @@
 	let content = '';
 
 	let voiceInput = false;
+	$: if (!($config?.audio?.stt?.enabled ?? true)) voiceInput = false;
 </script>
 
 <Modal
@@ -101,7 +103,7 @@
 								}}
 							/>
 						</div>
-					{:else}
+					{:else if $config?.audio?.stt?.enabled ?? true}
 						<Tooltip content={$i18n.t('Voice Input')}>
 							<button
 								aria-label={$i18n.t('Voice Input')}

@@ -50,8 +50,6 @@
 	import ModelSettingsSection from './ModelSettingsSection.svelte';
 	import ProviderDetails from './ProviderDetails.svelte';
 	import LanguageModeSelect from '$lib/components/common/LanguageModeSelect.svelte';
-	import LocalizedPromptSuggestions from './LocalizedPromptSuggestions.svelte';
-	import PromptSuggestions from './PromptSuggestions.svelte';
 	import TerminalSelector from './TerminalSelector.svelte';
 	import TTSVoiceInput from './TTSVoiceInput.svelte';
 	import VoiceAvatarSettings from './VoiceAvatarSettings.svelte';
@@ -64,11 +62,7 @@
 	import AccessControlModal from '../common/AccessControlModal.svelte';
 	import AccessButton from '$lib/components/common/AccessButton.svelte';
 	import { copyToClipboard, extractInputVariables } from '$lib/utils';
-	import {
-		modelControlTranslationSource,
-		pruneEmptyLocaleEntries,
-		resolveLocalizedPromptSuggestions
-	} from '$lib/utils/localizedContent';
+	import { modelControlTranslationSource, pruneEmptyLocaleEntries } from '$lib/utils/localizedContent';
 
 	const i18n: any = getContext('i18n');
 	const formId = `model-editor-${uuidv4()}`;
@@ -138,7 +132,6 @@
 	let showSystemPrompt = true;
 	let showAdvanced = false;
 	let showPreview = false;
-	let customPromptDraft: any[] | null = null;
 	let showAccessControlModal = false;
 
 	let loaded = false;
@@ -207,7 +200,6 @@
 			subagents: undefined as { model_ids: string[] } | undefined,
 			description: '',
 			i18n: {} as Record<string, Record<string, any>>,
-			suggestion_prompts: null,
 			tags: []
 		},
 		params: {
@@ -659,7 +651,6 @@
 	};
 
 	const loadModel = async (value: any) => {
-		customPromptDraft = null;
 		model = value ? structuredClone(value) : null;
 		backgroundFile = null;
 		avatarFile = null;
@@ -1626,69 +1617,6 @@
 								</section>
 
 								<fieldset disabled={readOnly} class="min-w-0">
-									<section class="mt-0.5">
-										<ModelSettingsSection
-											label={$i18n.t('Prompts')}
-											description={$i18n.t(
-												'Set the starter suggestions people see when opening a new chat with this model.'
-											)}
-											summary={editingLocale
-												? Array.isArray(info.meta.i18n?.[editingLocale]?.suggestion_prompts)
-													? $i18n.t('Custom')
-													: $i18n.t('Default')
-												: info.meta.suggestion_prompts == null
-													? $i18n.t('Default')
-													: `${$i18n.t('Custom')} · ${info.meta.suggestion_prompts.length}`}
-										>
-											{#if editingLocale}
-												<LocalizedPromptSuggestions
-													promptSuggestions={info.meta.suggestion_prompts ??
-														resolveLocalizedPromptSuggestions(
-															$config?.default_prompt_suggestions,
-															$config?.default_prompt_suggestions_i18n ?? {},
-															editingLocale,
-															(key) => $i18n.t(key)
-														)}
-													bind:localizedPromptSuggestions={info.meta.i18n}
-													locale={editingLocale}
-													localeLabel={editingLocaleLabel}
-													disabled={readOnly}
-												/>
-											{:else if info.meta.suggestion_prompts != null}
-												<PromptSuggestions
-													bind:promptSuggestions={info.meta.suggestion_prompts}
-													disabled={readOnly}
-												>
-													<button
-														slot="label"
-														disabled={readOnly}
-														type="button"
-														class="hover:text-gray-900 disabled:opacity-40 dark:hover:text-gray-100"
-														on:click={() => {
-															customPromptDraft = structuredClone(info.meta.suggestion_prompts);
-															info.meta.suggestion_prompts = null;
-														}}>{$i18n.t('Use default')}</button
-													>
-												</PromptSuggestions>
-											{:else}
-												<div
-													class="flex items-center justify-between gap-3 px-1 py-1 text-xs text-gray-500 dark:text-gray-400"
-												>
-													<span>{$i18n.t('Using default prompt suggestions')}</span>
-													<button
-														type="button"
-														class="shrink-0 hover:text-gray-900 dark:hover:text-gray-100"
-														on:click={() => {
-															info.meta.suggestion_prompts = customPromptDraft ?? [
-																{ content: '', title: ['', ''] }
-															];
-														}}>{$i18n.t('Customize')}</button
-													>
-												</div>
-											{/if}
-										</ModelSettingsSection>
-									</section>
-
 									<hr class="my-3 border-gray-100/60 dark:border-gray-850/60" />
 
 									<div class="my-3 space-y-0.5">

@@ -112,7 +112,12 @@ REALTIME_CONFIG_KEYS = {
     'REALTIME_CALL_PROMPT_TEMPLATE': 'audio.realtime.prompt_template',
 }
 
+CALL_CONFIG_KEYS = {
+    'ENABLED': 'audio.call.enabled',
+}
+
 STT_CONFIG_KEYS = {
+    'ENABLED': 'audio.stt.enabled',
     'OPENAI_API_BASE_URL': 'audio.stt.openai.api_base_url',
     'OPENAI_API_KEY': 'audio.stt.openai.api_key',
     'OPENAI_API_REQUEST_FORMAT': 'audio.stt.openai.api_request_format',
@@ -274,7 +279,12 @@ class TTSConfigForm(BaseModel):
     MISTRAL_API_BASE_URL: str
 
 
+class CallConfigForm(BaseModel):
+    ENABLED: bool = True
+
+
 class STTConfigForm(BaseModel):
+    ENABLED: bool = True
     OPENAI_API_BASE_URL: str
     OPENAI_API_KEY: str
     OPENAI_API_REQUEST_FORMAT: str = 'multipart'
@@ -311,12 +321,14 @@ class AudioConfigUpdateForm(BaseModel):
     tts: TTSConfigForm
     stt: STTConfigForm
     realtime: Optional[RealtimeConfigForm] = None
+    call: Optional[CallConfigForm] = None
 
 
 @router.get('/config')
 async def get_audio_config(request: Request, user=Depends(get_admin_user)):
     return {
         'realtime': await get_config_values(REALTIME_CONFIG_KEYS),
+        'call': await get_config_values(CALL_CONFIG_KEYS),
         'tts': await get_config_values(TTS_CONFIG_KEYS),
         'stt': await get_config_values(STT_CONFIG_KEYS),
     }
@@ -332,6 +344,11 @@ async def update_audio_config(request: Request, form_data: AudioConfigUpdateForm
             raise HTTPException(400, 'Local TTS is unavailable in slim. Select an external text-to-speech engine.')
     await Config.upsert(
         {
+            **(
+                config_updates(form_data.call.model_dump(exclude_unset=True), CALL_CONFIG_KEYS)
+                if form_data.call
+                else {}
+            ),
             **(
                 config_updates(form_data.realtime.model_dump(exclude_unset=True), REALTIME_CONFIG_KEYS)
                 if form_data.realtime

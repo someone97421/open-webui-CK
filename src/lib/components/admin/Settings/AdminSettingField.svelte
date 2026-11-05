@@ -5,7 +5,7 @@
 	export let className = '';
 </script>
 
-<div class={className}>
+<div class={className} data-settings-search-target={label || undefined}>
 	{#if label}
 		<label class="text-xs text-gray-600 dark:text-gray-400" for={forId || undefined}>
 			{label}
