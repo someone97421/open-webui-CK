@@ -49,6 +49,7 @@
 		terminalServers,
 		functions,
 		selectedFolder,
+		folders,
 		showEmbeds,
 		selectedTerminalId,
 		showFileNavPath,
@@ -83,7 +84,13 @@
 	import { createTemporaryChatId, isTemporaryChatId } from '$lib/utils/chatId';
 	import { registerTemporaryChat } from '$lib/apis/terminal';
 	import { resumeTemporaryChat } from '$lib/apis';
-	import { getFolderById } from '$lib/apis/folders';
+	import { getFolderById, getFolderAttachments, type FolderAttachments } from '$lib/apis/folders';
+	import {
+		attachmentOverrides, effectiveAttachments, updateAttachmentDelta, skillAvailable,
+		toolAvailable, scopedSkills, canonicalSkillId, canonicalSkillIds,
+		runtimeAttachmentCapabilities, defaultAttachmentPolicy, type AttachmentPolicy, type SkillMode
+	} from '$lib/utils/skillPolicy';
+	import { loadSkillCatalog } from './skillCatalog';
 	import { getFolderProject } from '$lib/utils/projects';
 	import {
 		applyResponseStreamEvent,
@@ -358,6 +365,119 @@
 
 	let selectedToolIds: string[] = [];
 	let selectedSkillIds: string[] = [];
+	let attachment_overrides = attachmentOverrides();
+	let previousSkillIds: string[] = [];
+	let previousToolIds: string[] = [];
+	let attachmentsInitialized = false;
+	const attachmentPolicy = writable<AttachmentPolicy>(defaultAttachmentPolicy);
+	setContext('attachmentPolicy', attachmentPolicy);
+	let folderAttachments: FolderAttachments | null = null;
+	let attachmentMode: SkillMode = 'chat';
+	let attachmentFolderKey = '';
+	let attachmentRequest = 0;
+	let attachmentsLoading = false;
+	const loadFolderAttachments = async (folder: any, key: string) => {
+		attachmentFolderKey = key;
+		const request = ++attachmentRequest;
+		folderAttachments = null;
+		attachmentsLoading = !!folder?.id;
+		if (!folder?.id) return;
+		try {
+			const result = await getFolderAttachments(localStorage.token, folder.id);
+			if (request !== attachmentRequest) return;
+			folderAttachments = result;
+			folderModeError = false;
+		} catch (error) {
+			if (request !== attachmentRequest) return;
+			if ((error as any)?.status === 404 && $chatId && !readProject(folder)) {
+				chatFolder = null;
+				chatFolderChatId = $chatId;
+				folderModeError = false;
+			} else {
+				folderModeError = true;
+				toast.error(`${error}`);
+			}
+		} finally {
+			if (request === attachmentRequest) attachmentsLoading = false;
+		}
+	};
+	const folderAttachmentSignature = (folder: any, allFolders: any[]) => {
+		const chain = [];
+		const seen = new Set<string>();
+		while (folder && !seen.has(folder.id)) {
+			seen.add(folder.id);
+			chain.push([folder.id, folder.parent_id, folder.updated_at, folder.data]);
+			folder = folder.parent_id ? allFolders.find((item) => item.id === folder.parent_id) : null;
+		}
+		return JSON.stringify(chain);
+	};
+	$: attachmentFolderSignature = folderAttachmentSignature(activeFolder, $folders);
+	$: if (attachmentFolderSignature !== attachmentFolderKey) {
+		void loadFolderAttachments(activeFolder, attachmentFolderSignature);
+	}
+	$: attachmentMode = folderAttachments?.mode ?? (activeFolder ? 'assistant' : 'chat');
+	$: attachmentModels = selectedModelIds.map((id) => $models.find((model) => model.id === id)).filter(Boolean);
+	$: attachmentCaps = runtimeAttachmentCapabilities(attachmentModels, $config, $user, attachmentMode,
+		{ web_search: webSearchActive, image_generation: imageGenerationEnabled, code_interpreter: codeInterpreterEnabled },
+		{ ...$settings?.params, ...params }, !!$socket?.id, chat?.meta?.internal === true && chat?.meta?.type === 'note');
+	$: attachmentTerminalAvailable = attachmentMode === 'project' && !!modeTerminalId && attachmentCaps.terminal !== false && terminalCatalogAvailable;
+	let skillCatalogKey = '';
+	let skillCatalogRequest = 0;
+	let terminalCatalogAvailable = false;
+	const refreshSkillCatalog = async (key: string, policy: Partial<AttachmentPolicy>) => {
+		skillCatalogKey = key;
+		const request = ++skillCatalogRequest;
+		terminalCatalogAvailable = false;
+		terminalSkills.set([]);
+		try {
+			const result = await loadSkillCatalog(localStorage.token, policy);
+			if (request !== skillCatalogRequest) return;
+			skills.set(result.items.filter((skill) => skill.source !== 'terminal'));
+			terminalSkills.set(result.items.filter((skill) => skill.source === 'terminal'));
+			terminalCatalogAvailable = result.statuses.some((status) => status.source === 'terminal' && status.available === true);
+		} catch (error) {
+			if (request === skillCatalogRequest) console.error('[skill catalog]', error);
+		}
+	};
+	onDestroy(() => { attachmentRequest += 1; skillCatalogRequest += 1; });
+	$: if (JSON.stringify([attachmentMode, folderAttachments?.project_id, modeTerminalId, attachmentCaps.terminal, attachmentFolderSignature]) !== skillCatalogKey) {
+		void refreshSkillCatalog(JSON.stringify([attachmentMode, folderAttachments?.project_id, modeTerminalId, attachmentCaps.terminal, attachmentFolderSignature]),
+			{ mode: attachmentMode, projectId: folderAttachments?.project_id, terminalId: modeTerminalId, capabilities: attachmentCaps });
+	}
+	$: modelSkillDefaults = attachmentModels.flatMap((model) => model.info?.meta?.skillIds ?? []);
+	$: modelToolDefaults = attachmentModels.flatMap((model) => model.info?.meta?.toolIds ?? ($settings as any)?.tools ?? []);
+	$: attachmentPolicy.set({
+		mode: attachmentMode, capabilities: attachmentCaps, terminalAvailable: attachmentTerminalAvailable,
+		projectId: folderAttachments?.project_id, terminalId: modeTerminalId,
+		skillSources: Object.fromEntries([...modelSkillDefaults.map((id) => [canonicalSkillId(id, scopedSkills($skills ?? [], $terminalSkills ?? [])), '模型默认']), ...(folderAttachments?.skill_ids ?? []).map((id) => [canonicalSkillId(id, scopedSkills($skills ?? [], $terminalSkills ?? [])), `分组默认：${folderAttachments?.skill_source_id ?? ''}`])]),
+		toolSources: Object.fromEntries([...modelToolDefaults.map((id) => [id, '模型默认']), ...(folderAttachments?.tool_ids ?? []).map((id) => [id, `分组默认：${folderAttachments?.tool_source_id ?? ''}`])])
+	});
+	$: if (!loading && !attachmentsLoading) {
+		if (attachmentsInitialized) {
+			const next = {
+				version: 1 as const,
+				skills: updateAttachmentDelta(attachment_overrides.skills, previousSkillIds, selectedSkillIds),
+				tools: updateAttachmentDelta(attachment_overrides.tools, previousToolIds, selectedToolIds)
+			};
+			if (!equal(next, attachment_overrides)) attachment_overrides = next;
+		}
+		const catalog = scopedSkills($skills ?? [], $terminalSkills ?? []);
+		const normalized = {
+			...attachment_overrides,
+			skills: { added: canonicalSkillIds(attachment_overrides.skills.added, catalog), removed: canonicalSkillIds(attachment_overrides.skills.removed, catalog) }
+		};
+		if (!equal(normalized, attachment_overrides)) attachment_overrides = normalized;
+		const nextSkills = effectiveAttachments(canonicalSkillIds([...modelSkillDefaults, ...(folderAttachments?.skill_ids ?? [])], catalog), attachment_overrides.skills)
+			.filter((id) => skillAvailable(catalog.find((skill) => skill.id === id), attachmentMode, attachmentCaps, attachmentTerminalAvailable));
+		const nextTools = effectiveAttachments([...modelToolDefaults, ...(folderAttachments?.tool_ids ?? [])], attachment_overrides.tools)
+			.filter((id) => toolAvailable(($tools ?? []).find((tool) => tool.id === id) ??
+				(id.startsWith('direct_server:') && ($toolServers ?? []).some((server, index) => String(index) === id.slice('direct_server:'.length) || server.id === id.slice('direct_server:'.length)) ? { id } : null), attachmentCaps));
+		previousSkillIds = nextSkills;
+		previousToolIds = nextTools;
+		if (!equal(selectedSkillIds, nextSkills)) selectedSkillIds = nextSkills;
+		if (!equal(selectedToolIds, nextTools)) selectedToolIds = nextTools;
+		attachmentsInitialized = true;
+	}
 	let selectedFilterIds: string[] = [];
 	let pendingOAuthTools: { id: string; name: string; serverId: string; authType: string | null }[] =
 		[];
@@ -373,11 +493,13 @@
 	const chatMode = writable({ project: null as ReturnType<typeof getFolderProject>, ready: false });
 	setContext('chatMode', chatMode);
 	$: activeFolder = $chatId
-		? chatFolderChatId === $chatId ? chatFolder : null
+		? chatFolderChatId === $chatId ? ($folders.find((folder) => folder.id === chatFolder?.id) ?? chatFolder) : null
 		: $selectedFolder;
-	$: project = readProject(activeFolder);
+	$: project = folderAttachments?.mode === 'project'
+		? { version: 1 as const, archived: readProject(activeFolder)?.archived ?? false, terminal_id: folderAttachments.terminal_id!, id: folderAttachments.project_id }
+		: readProject(activeFolder);
 	$: modeTerminalId = project?.terminal_id ?? null;
-	$: chatMode.set({ project, ready: !loading && !folderModeError });
+	$: chatMode.set({ project, ready: !loading && !folderModeError && !attachmentsLoading });
 	$: if ($selectedTerminalId !== modeTerminalId) selectedTerminalId.set(modeTerminalId);
 	$: if (project) {
 		if (codeInterpreterEnabled) codeInterpreterEnabled = false;
@@ -887,8 +1009,21 @@
 			prompt = input.prompt ?? '';
 			messageInput?.setText(prompt);
 			files = input.files ?? [];
-			selectedToolIds = input.selectedToolIds ?? [];
-			selectedSkillIds = input.selectedSkillIds ?? [];
+			const restored = attachmentOverrides(input.attachment_overrides, input);
+			if (!input.attachment_overrides) {
+				const presets = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
+					.map((id) => $models.find((model) => model.id === id));
+				const defaultSkills = new Set([...presets.flatMap((model) => model?.info?.meta?.skillIds ?? []), ...(folderAttachments?.skill_ids ?? [])]);
+				const defaultTools = new Set([...presets.flatMap((model) => model?.info?.meta?.toolIds ?? ($settings as any)?.tools ?? []), ...(folderAttachments?.tool_ids ?? [])]);
+				restored.skills.added = restored.skills.added.filter((id) => !defaultSkills.has(id));
+				restored.tools.added = restored.tools.added.filter((id) => !defaultTools.has(id));
+			}
+			attachment_overrides = input.attachment_overrides ? restored : {
+				version: 1,
+				skills: { ...attachment_overrides.skills, added: [...new Set([...attachment_overrides.skills.added, ...restored.skills.added])].filter((id) => !attachment_overrides.skills.removed.includes(id)) },
+				tools: { ...attachment_overrides.tools, added: [...new Set([...attachment_overrides.tools.added, ...restored.tools.added])].filter((id) => !attachment_overrides.tools.removed.includes(id)) }
+			};
+			attachmentsInitialized = false;
 			selectedFilterIds = input.selectedFilterIds ?? [];
 			webSearchEnabled = input.webSearchEnabled ?? false;
 			imageGenerationEnabled = input.imageGenerationEnabled ?? false;
@@ -936,7 +1071,7 @@
 	}
 
 	let saveControlsTimer;
-	$: if (!loading && !$temporaryChatEnabled && $chatId && chatFiles) {
+	$: if (!loading && !$temporaryChatEnabled && $chatId && chatFiles && attachment_overrides) {
 		clearTimeout(saveControlsTimer);
 		saveControlsTimer = setTimeout(saveControls, 400);
 	}
@@ -964,6 +1099,8 @@
 		clearTimeout(saveControlsTimer);
 		await saveControls();
 		if (signal.aborted) return;
+		attachment_overrides = attachmentOverrides();
+		attachmentsInitialized = false;
 		loading = true;
 
 		prompt = '';
@@ -992,6 +1129,8 @@
 		terminalContext = null;
 		clearTimeout(saveControlsTimer);
 		await saveControls();
+		attachment_overrides = attachmentOverrides();
+		attachmentsInitialized = false;
 
 		if ($chatId && !$temporaryChatEnabled) {
 			updateLastReadAt($chatId);
@@ -1082,8 +1221,6 @@
 	const resetInput = async () => {
 		// Let the $: update finish first, or webSearchActive misses the default-feature writes
 		await tick();
-		selectedToolIds = [];
-		selectedSkillIds = [];
 		selectedFilterIds = [];
 		pendingOAuthTools = [];
 		webSearchEnabled = false;
@@ -1098,7 +1235,6 @@
 	let lastTerminalSkillSelector: string | null = null;
 	$: if ($selectedTerminalId !== lastTerminalSkillSelector) {
 		terminalContext = null;
-		selectedSkillIds = selectedSkillIds.filter((id) => !id.startsWith('terminal:'));
 		terminalSkills.set([]);
 		lastTerminalSkillSelector = $selectedTerminalId;
 	}
@@ -1137,26 +1273,6 @@
 				featureAvailable(feature) &&
 				currentModels.every((model) => model.info?.meta?.defaultFeatureIds?.includes(feature));
 			const defaults: Record<string, any> = {
-				selectedToolIds: [
-					...new Set(
-						currentModels.flatMap(
-							(model) =>
-								model.info?.meta?.toolIds?.filter(
-									(id: string) =>
-										selectedToolIds.includes(id) || ($tools as any[]).some((tool) => tool.id === id)
-								) ??
-								($settings as any)?.tools ??
-								[]
-						)
-					)
-				],
-				selectedSkillIds: [
-					...new Set(currentModels.flatMap((model) => model.info?.meta?.skillIds ?? []))
-				].filter(
-					(id) =>
-						selectedSkillIds.includes(id) ||
-						$skills.some((skill) => skill.id === id && skill.is_active)
-				),
 				selectedFilterIds: [
 					...new Set(currentModels.flatMap((model) => model.info?.meta?.defaultFilterIds ?? []))
 				],
@@ -1168,8 +1284,6 @@
 
 			if (preserveSelections) {
 				const current: Record<string, any> = {
-					selectedToolIds: [...selectedToolIds, ...pendingOAuthTools.map((tool) => tool.id)],
-					selectedSkillIds,
 					selectedFilterIds,
 					webSearchEnabled,
 					imageGenerationEnabled,
@@ -1210,8 +1324,6 @@
 			defaults.terminalId = modeTerminalId;
 			defaultsModelIds = modelIds;
 			({
-				selectedToolIds,
-				selectedSkillIds,
 				selectedFilterIds,
 				webSearchEnabled,
 				imageGenerationEnabled,
@@ -1220,9 +1332,9 @@
 			selectedTerminalId.set(defaults.terminalId);
 
 			pendingOAuthTools = [];
-			selectedToolIds = selectedToolIds.filter((id) => {
+			selectedToolIds.forEach((id) => {
 				const tool = ($tools as any[]).find((tool) => tool.id === id);
-				if (tool?.authenticated !== false) return true;
+				if (tool?.authenticated !== false) return;
 				const parts = id.split(':');
 				pendingOAuthTools.push({
 					id,
@@ -1230,7 +1342,6 @@
 					serverId: parts.at(-1) ?? id,
 					authType: parts.length > 1 ? (parts[0] === 'server' ? parts[1] : parts[0]) : null
 				});
-				return false;
 			});
 			await continueOAuthRedirect();
 		} finally {
@@ -2667,6 +2778,10 @@
 		clearTimeout(saveControlsTimer);
 		await saveControls();
 		if (signal.aborted) return;
+		attachment_overrides = attachmentOverrides();
+		attachmentsInitialized = false;
+		selectedToolIds = [];
+		selectedSkillIds = [];
 		if ($chatId) terminalContext = null;
 		cancelBrowserInteractions();
 		bridge?.end();
@@ -2806,7 +2921,6 @@
 
 		autoScroll = true;
 
-		// resetInput() must stay last: the selected model's defaults override the draft's selection.
 		const chatInputPrompt = (await restoreChatInput(sessionStorage.getItem('chat-input')))
 			? prompt
 			: null;
@@ -2878,6 +2992,10 @@
 				selectedToolIds = [...selectedToolIds, pendingToolId];
 			}
 		}
+		attachment_overrides = {
+			...attachment_overrides,
+			tools: { ...attachment_overrides.tools, added: [...new Set([...attachment_overrides.tools.added, ...selectedToolIds])], removed: attachment_overrides.tools.removed.filter((id) => !selectedToolIds.includes(id)) }
+		};
 
 		loading = false;
 		await tick();
@@ -2965,8 +3083,10 @@
 		});
 
 		if (loadedChat) {
+			let folderLookupFailed = false;
 			const folder = loadedChat.folder_id
-				? await getFolderById(localStorage.token, loadedChat.folder_id).catch((error) => {
+				? await getFolderById(localStorage.token, loadedChat.folder_id, true).catch((error) => {
+					folderLookupFailed = true;
 					if (!signal.aborted) toast.error(`${error}`);
 					return null;
 				})
@@ -2974,7 +3094,7 @@
 			if (signal.aborted || id !== $chatId) return;
 			chatFolder = folder;
 			chatFolderChatId = id;
-			folderModeError = !!loadedChat.folder_id && !folder;
+			folderModeError = folderLookupFailed || (!!loadedChat.folder_id && !folder && !!readProject($folders.find((item) => item.id === loadedChat.folder_id)));
 			const loadedTags = await getTagsById(localStorage.token, id, signal).catch(async (error) => {
 				console.warn('[note-chat] getTagsById failed; continuing without tags', {
 					chatIdProp,
@@ -2989,6 +3109,8 @@
 			noteChatDebug('getTagsById completed', { tagCount: tags?.length ?? 0 });
 
 			const chatContent = chat.chat;
+			attachment_overrides = attachmentOverrides(chatContent?.attachment_overrides, chatContent);
+			attachmentsInitialized = false;
 			chatVariables = chat?.variables ?? {};
 
 			if (chatContent) {
@@ -3990,7 +4112,7 @@
 			bridge: bridgeRequest = null
 		}: { _raw?: boolean; bridge?: { userMessageId: string; modelId: string } | null } = {}
 	): Promise<BridgeSubmission> => {
-		if (loading || folderModeError) return { status: 'rejected' };
+		if (loading || folderModeError || attachmentsLoading) return { status: 'rejected' };
 		if (files.some((file: any) => file.type === 'filesystem' &&
 			(!project || file.terminal_id !== project.terminal_id))) {
 			toast.error('文件所属工作区与当前会话不一致，请重新上传。');
@@ -4589,6 +4711,7 @@
 						: $config?.features?.enable_tools
 				),
 				skill_ids: skillIds.length > 0 ? skillIds : undefined,
+				attachment_overrides,
 				terminal_id: terminalEnabled && requestTerminalId ? requestTerminalId : undefined,
 				tool_servers: $config?.features?.enable_tool_servers
 					? [
@@ -4988,6 +5111,7 @@
 					id: _chatId,
 					title: $i18n.t('New Chat'),
 					models: selectedModels,
+					attachment_overrides,
 					system: $settings.system ?? undefined,
 					params: params,
 					history: _history,
@@ -5045,6 +5169,7 @@
 			if (!$temporaryChatEnabled) {
 				chat = await updateChatById(localStorage.token, _chatId, {
 					models: selectedModels,
+					attachment_overrides,
 					history: history,
 					messages: createMessagesList(history, history.currentId),
 					files: chatFiles
@@ -5065,11 +5190,12 @@
 		if (!$chatId || $temporaryChatEnabled || chat?.id !== $chatId) return;
 		// Model choices are passed explicitly; automatic fallbacks must not be saved.
 		if (!models?.length || !models.every(Boolean)) models = null;
-		if (!models && equal(chatFiles, chat.chat?.files ?? [])) return;
+		if (!models && equal(chatFiles, chat.chat?.files ?? []) && equal(attachment_overrides, chat.chat?.attachment_overrides)) return;
 		const id = $chatId;
 
 		const res = await updateChatById(localStorage.token, id, {
 			files: chatFiles,
+			attachment_overrides,
 			...(models ? { models } : {})
 		}).catch((err) => {
 			console.error('[controls autosave]', err);
@@ -5095,6 +5221,7 @@
 			})),
 		selectedToolIds,
 		selectedSkillIds,
+		attachment_overrides,
 		selectedFilterIds,
 		imageGenerationEnabled,
 		webSearchEnabled,
@@ -5102,13 +5229,17 @@
 	});
 
 	const saveDraft = async (draft: any, chatId: string | null = null, debounce = true) => {
+		const draftChatId = $chatId;
+		await tick();
+		if (draftChatId !== $chatId) return;
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
 		}
 
 		if (draft.prompt !== null && draft.prompt.length < MAX_DRAFT_LENGTH) {
 			const key = `chat-input${chatId ? `-${chatId}` : ''}`;
-			const write = () => sessionStorage.setItem(key, JSON.stringify(draft));
+			const savedDraft = { ...draft, attachment_overrides: structuredClone(attachment_overrides) };
+			const write = () => sessionStorage.setItem(key, JSON.stringify(savedDraft));
 			if (debounce) {
 				saveDraftTimeout = setTimeout(write, 500);
 			} else {
@@ -5462,6 +5593,7 @@
 								chat: {
 									title: $chatTitle,
 									models: selectedModels,
+									attachment_overrides,
 									system: $settings.system ?? undefined,
 									params: params,
 									history: history,
@@ -5492,6 +5624,7 @@
 											id: uuidv4(),
 											title: title.length > 50 ? `${title.slice(0, 50)}...` : title,
 											models: selectedModels,
+											attachment_overrides,
 											params: params,
 											history: history,
 											messages: messages,

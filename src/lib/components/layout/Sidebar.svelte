@@ -93,7 +93,6 @@
 	import ChatItem from './Sidebar/ChatItem.svelte';
 	import Spinner from '../common/Spinner.svelte';
 	import SiteLogo from '../common/SiteLogo.svelte';
-	import Loader from '../common/Loader.svelte';
 	import Folder from '../common/Folder.svelte';
 	import SidebarSection from './Sidebar/Section.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
@@ -247,6 +246,13 @@
 	let chatListReady = false;
 	// Read pagination state when the shared list publishes its rows.
 	$: allChatsLoaded = $chats !== null && allLoaded;
+	const SIDEBAR_PAGE_SIZE = 5;
+	let showChats = true;
+	let visibleChatCount = SIDEBAR_PAGE_SIZE;
+	let showPinnedChats = true;
+	let visiblePinnedChatCount = SIDEBAR_PAGE_SIZE;
+	$: if (!showChats) visibleChatCount = SIDEBAR_PAGE_SIZE;
+	$: if (!showChats || !showPinnedChats) visiblePinnedChatCount = SIDEBAR_PAGE_SIZE;
 
 	let showCreateFolderModal = false;
 	let showCreateProjectModal = false;
@@ -610,15 +616,20 @@
 	};
 
 	const loadMoreChats = async () => {
-		if (chatListLoading || allChatsLoaded || !$showSidebar) {
-			return;
-		}
-
+		if (chatListLoading || !$showSidebar) return;
+		const targetCount = visibleChatCount + SIDEBAR_PAGE_SIZE;
 		chatListLoading = true;
-
-		await loadNextChatListPage(localStorage.token);
-
-		chatListLoading = false;
+		try {
+			while (($chats?.length ?? 0) < targetCount && !allLoaded) {
+				const result = await loadNextChatListPage(localStorage.token);
+				if (!result.accepted) break;
+			}
+			if (showChats) visibleChatCount = targetCount;
+		} catch (error) {
+			toast.error(`${error}`);
+		} finally {
+			chatListLoading = false;
+		}
 	};
 
 	const applyFolderUnreadCounts = (folderUnreadCounts: Record<string, number>) => {
@@ -1648,7 +1659,8 @@
 					{#if section.id === 'chats'}
 					<SidebarSection
 						id="sidebar-chats"
-					name="会话"
+						bind:open={showChats}
+					name="对话(快速聊天)"
 						on:change={async (e) => {
 							selectedFolder.set(null);
 						}}
@@ -1763,6 +1775,7 @@
 								<div class="flex flex-col space-y-1 rounded-xl">
 									<Folder
 										id="sidebar-pinned-chats"
+										bind:open={showPinnedChats}
 										buttonClassName=" text-gray-500"
 										on:import={(e) => {
 											importChatHandler(e.detail, true);
@@ -1830,7 +1843,7 @@
 											class="ml-3 pl-1 mt-[0.0625rem] flex flex-col overflow-y-auto scrollbar-hidden border-s border-gray-100 dark:border-gray-900 text-gray-700 dark:text-gray-300"
 											role="list"
 										>
-											{#each $pinnedChats as chat, idx (`pinned-chat-${chat?.id ?? idx}`)}
+											{#each $pinnedChats.slice(0, visiblePinnedChatCount) as chat, idx (`pinned-chat-${chat?.id ?? idx}`)}
 												<div role="listitem">
 													<ChatItem
 														className=""
@@ -1861,6 +1874,15 @@
 												</div>
 											{/each}
 										</div>
+										{#if $pinnedChats.length > visiblePinnedChatCount}
+											<button
+												type="button"
+												class="w-full px-2.5 py-1.5 text-left text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+												on:click={() => (visiblePinnedChatCount += SIDEBAR_PAGE_SIZE)}
+											>
+												{$i18n.t('Click to show more')}
+											</button>
+										{/if}
 									</Folder>
 								</div>
 							</div>
@@ -1870,7 +1892,7 @@
 							<div class="pt-1.5">
 								{#if $chats}
 									<div role="list">
-										{#each $chats as chat, idx (`chat-${chat?.id ?? idx}`)}
+										{#each $chats.slice(0, visibleChatCount) as chat, idx (`chat-${chat?.id ?? idx}`)}
 											<div role="listitem">
 												{#if idx === 0 || (idx > 0 && chat.time_range !== $chats[idx - 1].time_range)}
 													<h3
@@ -1931,21 +1953,16 @@
 										{/each}
 									</div>
 
-									{#if chatListReady && !allChatsLoaded}
-										<Loader
-											on:visible={(e) => {
-												if (!chatListLoading) {
-													loadMoreChats();
-												}
-											}}
+									{#if $chats.length > visibleChatCount || (chatListReady && !allChatsLoaded)}
+										<button
+											type="button"
+											class="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-xs text-gray-500 hover:text-gray-700 disabled:cursor-wait dark:hover:text-gray-300"
+											disabled={chatListLoading}
+											on:click={loadMoreChats}
 										>
-											<div
-												class="w-full flex justify-center py-1 text-xs animate-pulse items-center gap-2"
-											>
-												<Spinner className=" size-4" />
-												<div class=" ">{$i18n.t('Loading...')}</div>
-											</div>
-										</Loader>
+											{#if chatListLoading}<Spinner className="size-3.5" />{/if}
+											{$i18n.t(chatListLoading ? 'Loading...' : 'Click to show more')}
+										</button>
 									{/if}
 								{:else}
 									<div
@@ -1964,7 +1981,7 @@
 						<SidebarSection
 							id="sidebar-folders"
 							bind:open={showFolders}
-							name={$i18n.t('Folders')}
+						name="助手(自定义工具)"
 							onAdd={() => {
 								showCreateFolderModal = true;
 							}}
@@ -1993,6 +2010,7 @@
 							<Folders
 								bind:folderRegistry
 								folders={legacyFolders}
+								open={showFolders}
 								{shiftKey}
 								onFolderUnreadCounts={applyFolderUnreadCounts}
 								onDelete={(folderId) => {
@@ -2017,13 +2035,14 @@
 						<SidebarSection
 							id="sidebar-projects"
 							bind:open={showProjects}
-							name="项目"
+						name="项目(Agent模式)"
 							onAdd={projectTerminalOptions.length > 0 ? () => (showCreateProjectModal = true) : null}
 							onAddLabel="新建项目"
 						>
 							<Folders
 								bind:folderRegistry
 								folders={activeProjectFolders}
+								open={showProjects}
 								{shiftKey}
 								onFolderUnreadCounts={applyFolderUnreadCounts}
 								onDelete={(folderId) => {
@@ -2044,6 +2063,7 @@
 									<Folders
 										bind:folderRegistry
 										folders={archivedProjectFolders}
+										open={showProjects && showArchivedProjects}
 										{shiftKey}
 										onFolderUnreadCounts={applyFolderUnreadCounts}
 										onDelete={(folderId) => {

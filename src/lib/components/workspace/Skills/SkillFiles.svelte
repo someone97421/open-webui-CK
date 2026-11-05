@@ -46,6 +46,8 @@
 	export let initialPath = 'SKILL.md';
 	export let onSave: () => Promise<void> = async () => {};
 	export let onContentChange: (path: string, content: string) => void = () => {};
+	export let listFiles: (() => Promise<{ files: SkillFileSummary[] }>) | null = null;
+	export let readFile: ((path: string) => Promise<Blob>) | null = null;
 	const i18n = getContext<any>('i18n');
 	type Draft = SkillFileSummary & {
 		sourcePath?: string;
@@ -194,7 +196,7 @@
 					: file.content
 			]);
 		if (file.upload) return file.upload;
-		return getSkillFile(localStorage.token, skillId, versionId!, file.sourcePath || file.path);
+		return readFile ? readFile(file.sourcePath || file.path) : getSkillFile(localStorage.token, skillId, versionId!, file.sourcePath || file.path);
 	};
 	const resolveRelative = (href: string, base: string) => {
 		if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('/') || href.startsWith('#'))
@@ -302,8 +304,8 @@
 		loading = true;
 		const key = loadKey;
 		try {
-			if (versionId) {
-				const result = await getSkillFiles(localStorage.token, skillId, versionId);
+			if (listFiles || versionId) {
+				const result = listFiles ? await listFiles() : await getSkillFiles(localStorage.token, skillId, versionId!);
 				if (key !== loadKey) return;
 				files = result.files.map((file: SkillFileSummary) => ({ ...file, sourcePath: file.path }));
 			} else
@@ -321,8 +323,8 @@
 			loading = false;
 		}
 	};
-	$: if (`${versionId ? skillId : 'new'}:${versionId}:${reloadKey}` !== loadKey) {
-		loadKey = `${versionId ? skillId : 'new'}:${versionId}:${reloadKey}`;
+	$: if (`${listFiles || versionId ? skillId : 'new'}:${versionId}:${reloadKey}` !== loadKey) {
+		loadKey = `${listFiles || versionId ? skillId : 'new'}:${versionId}:${reloadKey}`;
 		load();
 	}
 	const toggleFolder = (path: string) => {
@@ -476,8 +478,8 @@
 		flush();
 		// Reconcile structural edits against original paths. New draft files never reach the server until save.
 		const original = new Set(files.map((f) => f.sourcePath).filter(Boolean));
-		const baseline = versionId
-			? (await getSkillFiles(localStorage.token, skillId, versionId)).files
+		const baseline = listFiles || versionId
+			? (listFiles ? await listFiles() : await getSkillFiles(localStorage.token, skillId, versionId!)).files
 			: [];
 		const changes: SkillFileOperation[] = baseline
 			.filter((f: SkillFileSummary) => !original.has(f.path) && f.path !== 'SKILL.md')

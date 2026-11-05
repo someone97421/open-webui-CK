@@ -5,6 +5,11 @@
 	import Skills from './Commands/Skills.svelte';
 	import Emojis from './Commands/Emojis.svelte';
 	import DropdownMenu from '$lib/components/common/DropdownMenu.svelte';
+	import { setContext } from 'svelte';
+	import { readable, type Readable } from 'svelte/store';
+	import { defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
+	export let attachmentPolicy: Readable<AttachmentPolicy> = readable(defaultAttachmentPolicy);
+	setContext('attachmentPolicy', attachmentPolicy);
 
 	export let char = '';
 	export let query = '';

@@ -6,7 +6,14 @@
 
 	const i18n = getContext<any>('i18n');
 
-	import { createNewSkill, getSkills } from '$lib/apis/skills';
+	import { createSkillPackage, getSkills, type SkillPackageContext } from '$lib/apis/skills';
+	import { page } from '$app/stores';
+	let packageContext: SkillPackageContext = {
+		source: $page.url.searchParams.get('source') === 'terminal' ? 'terminal' : 'workspace',
+		terminal_id: $page.url.searchParams.get('terminal_id') || undefined,
+		project_id: $page.url.searchParams.get('project_id') || undefined,
+		chat_id: $page.url.searchParams.get('chat_id') || undefined
+	};
 	import SkillEditor from '$lib/components/workspace/Skills/SkillEditor.svelte';
 
 	let skill: {
@@ -23,11 +30,11 @@
 	let clone = false;
 
 	const onSubmit = async (_skill: any) => {
-		const res = await createNewSkill(localStorage.token, _skill);
+		const res = await createSkillPackage(localStorage.token, _skill, packageContext);
 
 		if (res) {
 			toast.success($i18n.t('Skill created successfully'));
-			await skills.set(await getSkills(localStorage.token));
+			if (res.source !== 'terminal') skills.set(await getSkills(localStorage.token));
 			return res;
 		}
 	};
@@ -87,5 +94,5 @@
 </script>
 
 {#key skill}
-	<SkillEditor {skill} {onSubmit} {clone} />
+	<SkillEditor {skill} {onSubmit} {clone} {packageContext} />
 {/key}

@@ -3,6 +3,9 @@
 	import { resolveLocalizedResource } from '$lib/utils/localizedContent';
 	import { getContext } from 'svelte';
 	import { toolServers, tools } from '$lib/stores';
+	import { readable, type Readable } from 'svelte/store';
+	import { toolAvailable, defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
+	const attachmentPolicy = getContext<Readable<AttachmentPolicy>>('attachmentPolicy') ?? readable(defaultAttachmentPolicy);
 
 	import Modal from '../common/Modal.svelte';
 	import Collapsible from '../common/Collapsible.svelte';
@@ -19,6 +22,7 @@
 	> = {};
 
 	const loadSpecs = async (tool: { id: string }) => {
+		if (!toolAvailable(tool, $attachmentPolicy.capabilities)) return;
 		if (discovery[tool.id]?.loading) return;
 		discovery = { ...discovery, [tool.id]: { loading: true } };
 		try {
@@ -44,7 +48,7 @@
 
 	let selectedTools: any[] = [];
 
-	$: selectedTools = (($tools ?? []) as any[]).filter((tool) => selectedToolIds.includes(tool.id));
+	$: selectedTools = (($tools ?? []) as any[]).filter((tool) => selectedToolIds.includes(tool.id) && toolAvailable(tool, $attachmentPolicy.capabilities));
 
 	$: selectedToolServers = (($toolServers ?? []) as any[]).filter((server, idx) =>
 		selectedToolIds.some((id) => {
@@ -108,7 +112,7 @@
 							}}
 							let:open
 						>
-							<button type="button" class="min-w-0 flex-1 text-left" aria-expanded={open}>
+							<button type="button" class="min-w-0 flex-1 text-left" aria-expanded={open} title={$attachmentPolicy.toolSources?.[tool.id] ?? '会话手动选择'}>
 								<div class="flex items-center gap-2 min-w-0">
 									<div class="text-sm font-normal dark:text-gray-100 text-gray-800 truncate">
 										{resolveLocalizedResource(tool, $i18n.language)}

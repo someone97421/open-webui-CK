@@ -38,9 +38,17 @@ class Skill(Base):
     created_at = Column(BigInteger)
 
 
+class SkillModes(BaseModel):
+    chat: bool = True
+    assistant: bool = True
+    project: bool = True
+
+
 class SkillMeta(BaseModel):
     i18n: dict[str, dict[str, str]] | None = None
     tags: Optional[list[str]] = []
+    modes: SkillModes = Field(default_factory=SkillModes)
+    requires: list[str] = Field(default_factory=list)
 
 
 class SkillModel(BaseModel):

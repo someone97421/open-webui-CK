@@ -3,28 +3,20 @@
 	import { functions as localizedFunctions } from '$lib/stores';
 	import { getContext, onDestroy, tick } from 'svelte';
 	import { fly } from 'svelte/transition';
+	import { readable, type Readable } from 'svelte/store';
+	import { skillAvailable, toolAvailable, defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
+	const attachmentPolicy = getContext<Readable<AttachmentPolicy>>('attachmentPolicy') ?? readable(defaultAttachmentPolicy);
 
 	import {
-		chatId,
 		config,
-		selectedTerminalId,
-		settings,
-		terminalServers,
-		terminalSkills,
 		user,
 		tools as _tools,
-		skills as _skills,
 		toolServers
 	} from '$lib/stores';
 
 	import { deleteOAuthSession } from '$lib/apis/auths';
 	import { getTools } from '$lib/apis/tools';
-	import { getSkills } from '$lib/apis/skills';
-	import {
-		listTerminalSkills,
-		resolveTerminalConnection,
-		type TerminalSkill
-	} from '$lib/apis/terminal';
+	import { loadSkillCatalog } from '../skillCatalog';
 
 	import { toast } from 'svelte-sonner';
 
@@ -100,8 +92,8 @@
 	let toolRequestId = 0;
 	let skillRequestId = 0;
 
-	$: toolIds = Object.keys(tools ?? {});
-	$: skillIds = Object.keys(skills ?? {});
+	$: toolIds = Object.keys(tools ?? {}).filter((id) => toolAvailable(tools?.[id], $attachmentPolicy.capabilities));
+	$: skillIds = Object.keys(skills ?? {}).filter((id) => skillAvailable(skills?.[id], $attachmentPolicy.mode, $attachmentPolicy.capabilities, $attachmentPolicy.terminalAvailable));
 
 	$: if (show && toolQuery !== searchedToolQuery) {
 		scheduleToolSearch();
@@ -161,16 +153,13 @@
 
 		tools = items;
 
-		if (!q) {
-			selectedToolIds = selectedToolIds.filter((id) => Object.keys(tools ?? {}).includes(id));
-		}
 	};
 
 	const setSkills = (skillItems: IntegrationItem[] | null, query = '') => {
 		skills = (skillItems ?? [])
 			.filter(
 				(skill) =>
-					skill.is_active &&
+					skillAvailable(skill, $attachmentPolicy.mode, $attachmentPolicy.capabilities, $attachmentPolicy.terminalAvailable) &&
 					(!query.trim() ||
 						`${skill.name} ${resolveLocalizedResource(skill, $i18n.language)} ${resolveLocalizedResource(skill, $i18n.language, 'description')}`
 							.toLowerCase()
@@ -185,22 +174,8 @@
 				return a;
 			}, {});
 
-		if (!query.trim()) {
-			selectedSkillIds = selectedSkillIds.filter((id) => Object.keys(skills ?? {}).includes(id));
-		}
 	};
 
-	const getTerminalSkillItems = async (): Promise<TerminalSkill[]> => {
-		const connection = resolveTerminalConnection(
-			$selectedTerminalId,
-			$terminalServers ?? [],
-			$settings?.terminalServers ?? [],
-			localStorage.token
-		);
-		const items = await listTerminalSkills(connection, $chatId || null).catch(() => []);
-		terminalSkills.set(items);
-		return items;
-	};
 
 	const loadTools = async (query = toolQuery) => {
 		const requestId = ++toolRequestId;
@@ -219,13 +194,10 @@
 		const q = query.trim();
 		searchedSkillQuery = query;
 
-		if ($_skills === null) {
-			await _skills.set(await getSkills(localStorage.token));
-		}
-		if (requestId !== skillRequestId) return;
-		const terminalItems = await getTerminalSkillItems();
-		if (requestId !== skillRequestId) return;
-		setSkills([...($_skills ?? []), ...terminalItems], q);
+		const policy = $attachmentPolicy;
+		const result = await loadSkillCatalog(localStorage.token, policy).catch(() => null);
+		if (requestId !== skillRequestId || policy !== $attachmentPolicy || !result) return;
+		setSkills(result.items, q);
 	};
 
 	const scheduleToolSearch = () => {
@@ -244,7 +216,7 @@
 
 	const toggleTool = async (toolId: string, e: MouseEvent) => {
 		const tool = tools?.[toolId];
-		if (!tool) return;
+		if (!tool || !toolAvailable(tool, $attachmentPolicy.capabilities)) return;
 
 		if (!(tool.authenticated ?? true)) {
 			e.preventDefault();
@@ -270,7 +242,7 @@
 
 	const toggleSkill = async (skillId: string) => {
 		const skill = skills?.[skillId];
-		if (!skill) return;
+		if (!skillAvailable(skill, $attachmentPolicy.mode, $attachmentPolicy.capabilities, $attachmentPolicy.terminalAvailable)) return;
 
 		const state = !selectedSkillIds.includes(skillId);
 		await tick();
@@ -567,6 +539,7 @@
 									<div
 										class="relative flex w-full justify-between gap-2 items-center h-[1.6875rem] px-2 text-[0.8125rem] font-normal cursor-pointer rounded-xl hover:bg-gray-50/40 dark:hover:bg-gray-800/40 has-[[role^=menuitem]:focus-visible]:outline-2 has-[[role^=menuitem]:focus-visible]:-outline-offset-2 has-[[role^=menuitem]:focus-visible]:outline-blue-500"
 										role="presentation"
+										title={$attachmentPolicy.toolSources?.[toolId] ?? '会话手动选择'}
 										on:click={async (e) => {
 											await toggleTool(toolId, e);
 										}}
@@ -710,6 +683,7 @@
 										class="relative flex w-full justify-between gap-2 items-center h-[1.6875rem] px-2 text-[0.8125rem] font-normal cursor-pointer rounded-xl hover:bg-gray-50/40 dark:hover:bg-gray-800/40"
 										role="menuitemcheckbox"
 										aria-checked={selectedSkillIds.includes(skillId)}
+										title={$attachmentPolicy.skillSources?.[skillId] ?? '会话手动选择'}
 										on:click={async () => {
 											await toggleSkill(skillId);
 										}}

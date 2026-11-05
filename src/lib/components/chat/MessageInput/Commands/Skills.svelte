@@ -1,19 +1,10 @@
 <script lang="ts">
 	import { resolveLocalizedResource } from '$lib/utils/localizedContent';
 	import { getContext, onDestroy } from 'svelte';
-	import { getSkillItems } from '$lib/apis/skills';
-	import {
-		listTerminalSkills,
-		resolveTerminalConnection,
-		type TerminalSkill
-	} from '$lib/apis/terminal';
-	import {
-		chatId,
-		selectedTerminalId,
-		settings,
-		terminalServers,
-		terminalSkills
-	} from '$lib/stores';
+	import { readable, type Readable } from 'svelte/store';
+	import { skillAvailable, defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
+	const attachmentPolicy = getContext<Readable<AttachmentPolicy>>('attachmentPolicy') ?? readable(defaultAttachmentPolicy);
+	import { loadSkillCatalog } from '../../skillCatalog';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Cube from '$lib/components/icons/Cube.svelte';
 
@@ -27,7 +18,7 @@
 
 	let searchDebounceTimer: ReturnType<typeof setTimeout>;
 
-	$: if (query !== undefined) {
+	$: if (query !== undefined && $attachmentPolicy) {
 		clearTimeout(searchDebounceTimer);
 		searchDebounceTimer = setTimeout(() => {
 			getItems();
@@ -38,27 +29,13 @@
 		clearTimeout(searchDebounceTimer);
 	});
 
+	let requestSequence = 0;
 	const getItems = async () => {
-		const [res, terminalItems] = await Promise.all([
-			getSkillItems(localStorage.token, query).catch(() => null),
-			getTerminalItems(query)
-		]);
-		filteredItems = [...(res?.items ?? []), ...terminalItems];
-	};
-
-	const getTerminalItems = async (query = ''): Promise<TerminalSkill[]> => {
-		const connection = resolveTerminalConnection(
-			$selectedTerminalId,
-			$terminalServers ?? [],
-			$settings?.terminalServers ?? [],
-			localStorage.token
-		);
-		const items = await listTerminalSkills(connection, $chatId || null).catch(() => []);
-		terminalSkills.set(items);
-		const q = query.trim().toLowerCase();
-		return q
-			? items.filter((skill) => `${skill.name} ${skill.description}`.toLowerCase().includes(q))
-			: items;
+		const sequence = ++requestSequence;
+		const policy = $attachmentPolicy;
+		const res = await loadSkillCatalog(localStorage.token, policy, query).catch(() => null);
+		if (sequence !== requestSequence || policy !== $attachmentPolicy) return;
+		filteredItems = (res?.items ?? []).filter((skill) => skillAvailable(skill, policy.mode, policy.capabilities, policy.terminalAvailable));
 	};
 
 	$: if (query) {

@@ -5,13 +5,15 @@
 	import XMark from '$lib/components/icons/XMark.svelte';
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import { toast } from 'svelte-sonner';
-	import { importSkillBundles, skillError } from '$lib/apis/skills';
-	import { formatFileSize } from '$lib/utils';
+	import { importSkillBundles, previewSkillPackages, createSkillPackage, skillFileBlob, skillError, type SkillPackageContext, type SkillFile } from '$lib/apis/skills';
+	import { formatFileSize, slugify } from '$lib/utils';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
 
 	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
 	export let show = false;
 	export let files: File[] = [];
 	export let onImported: () => Promise<void> = async () => {};
+	export let packageContext: SkillPackageContext = {};
 
 	let loading = false;
 	let error = '';
@@ -31,7 +33,9 @@
 		results = [];
 		items = [];
 		try {
-			const previewItems = await importSkillBundles(localStorage.token, previewFiles);
+			const previewItems = packageContext.source === 'terminal'
+				? (await previewSkillPackages(localStorage.token, previewFiles)).map((item: any) => ({ ...item, id: item.id?.startsWith('terminal:') ? slugify(item.name) : item.id, files: item.files.map((file: SkillFile) => ({ ...file, size: skillFileBlob(file).size })) }))
+				: await importSkillBundles(localStorage.token, previewFiles);
 			if (files !== previewFiles) return;
 			items = previewItems.map((item: any) => ({
 				...item,
@@ -50,16 +54,17 @@
 		const importFiles = files;
 		loading = true;
 		try {
-			const importResults: any[] = await importSkillBundles(
-				localStorage.token,
-				importFiles,
-				items.map(({ action, id, name, expected_version_id }) => ({
-					action,
-					id,
-					name,
-					expected_version_id
-				}))
-			);
+			let importResults: any[];
+			if (packageContext.source === 'terminal') {
+				importResults = [];
+				for (const item of items) {
+					if (item.action === 'skip') { importResults.push({ status: 'skipped' }); continue; }
+					try {
+						await createSkillPackage(localStorage.token, { id: item.id, name: item.name, description: item.description, meta: item.meta, is_active: item.is_active ?? true, files: item.files.map(({ path, content, encoding }: SkillFile) => ({ path, content, encoding })) }, packageContext);
+						importResults.push({ status: 'saved' });
+					} catch (error) { importResults.push({ status: 'error', error }); }
+				}
+			} else importResults = await importSkillBundles(localStorage.token, importFiles, items.map(({ action, id, name, expected_version_id }) => ({ action, id, name, expected_version_id })));
 			// A closed import can finish after a different bundle has opened.
 			if (files === importFiles) {
 				results = importResults.map((result, index) =>
@@ -97,11 +102,9 @@
 				<XMark className="size-4" />
 			</button>
 		</div>
-		<p class="shrink-0 px-4 pb-3 text-xs leading-5 text-gray-500 dark:text-gray-400">
-			{$i18n.t(
-				'New skills and copies are private. Replace saves a new version and preserves existing sharing.'
-			)}
-		</p>
+		<div class="shrink-0 px-4 pb-2 text-xs text-gray-500">
+			<Tooltip content={packageContext.source === 'terminal' ? '完整文件夹导入所选 Terminal 作用域；同名包请更改 ID 后导入。' : '新建与副本默认私有；替换会保存新版本，并保留现有共享权限。'}><span>导入选项</span></Tooltip>
+		</div>
 		<div class="min-h-0 overflow-y-auto overscroll-contain px-4" aria-busy={loading}>
 			{#if loading && !items.length}
 				<div

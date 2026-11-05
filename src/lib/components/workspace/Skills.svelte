@@ -94,6 +94,16 @@
 	import Pagination from '../common/Pagination.svelte';
 	import ChevronDown from '../icons/ChevronDown.svelte';
 	import ChevronUp from '../icons/ChevronUp.svelte';
+	import SkillLocation from './Skills/SkillLocation.svelte';
+	import TerminalSkills from './Skills/TerminalSkills.svelte';
+	import { page as currentPage } from '$app/stores';
+	import type { SkillPackageContext } from '$lib/apis/skills';
+	let packageContext: SkillPackageContext = {
+		source: $currentPage.url.searchParams.get('source') === 'terminal' ? 'terminal' : 'workspace',
+		terminal_id: $currentPage.url.searchParams.get('terminal_id') || undefined,
+		project_id: $currentPage.url.searchParams.get('project_id') || undefined,
+		chat_id: $currentPage.url.searchParams.get('chat_id') || undefined
+	};
 
 	let shiftKey = false;
 	let loaded = false;
@@ -121,7 +131,7 @@
 	let page = 1;
 
 	$: if (loaded) {
-		workspaceActions.set([
+		workspaceActions.set(packageContext.source === 'terminal' ? [] : [
 			{
 				id: 'skills-new',
 				label: $i18n.t('Create'),
@@ -181,7 +191,7 @@
 	}
 
 	const loadSkillItems = async () => {
-		if (!loaded) return;
+		if (!loaded || packageContext.source === 'terminal') return;
 
 		clearTimeout(searchDebounceTimer);
 		searchController?.abort();
@@ -350,6 +360,11 @@
 </svelte:head>
 
 <h1 class="sr-only">{$i18n.t('Skills')}</h1>
+
+<SkillLocation bind:context={packageContext} onChange={() => { page = 1; loadSkillItems(); }} />
+{#if packageContext.source === 'terminal'}
+	{#key JSON.stringify(packageContext)}<TerminalSkills context={packageContext} />{/key}
+{:else}
 
 <Comments modal bind:view={comments} resourceType="skill">
 	{#if loaded}
@@ -746,3 +761,4 @@
 		</div>
 	{/if}
 </Comments>
+{/if}

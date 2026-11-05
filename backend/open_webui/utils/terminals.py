@@ -1,7 +1,6 @@
 """Shared routing helpers for admin-configured terminal servers."""
 
 import asyncio
-import hashlib
 import logging
 import ntpath
 import posixpath
@@ -356,24 +355,13 @@ async def load_terminal_skill(
     *,
     refresh: bool = True,
 ) -> dict | None:
-    """Load the full source internally and pin/check its fingerprint before shaping model output."""
-    skill = await get_terminal_json(
-        request, user, metadata, f'/skills/read?name={quote(skill_name, safe="")}', extra_params
+    """加载当前 scope 的完整包并固定资源指纹；兼容旧名称引用。"""
+    from open_webui.utils.skill_packages import load_terminal_tool_package
+
+    skill_id = skill_name if skill_name.startswith('terminal:') else f'terminal:{quote(skill_name, safe="")}'
+    return await load_terminal_tool_package(
+        request, user, metadata, skill_id, extra_params, refresh=refresh, require_discovery=False,
     )
-
-    if not isinstance(skill, dict) or not isinstance(skill.get('content'), str):
-        return None
-
-    context = metadata.get('chat_context') or {}
-    metadata['chat_context'] = context
-    fingerprints = context.setdefault('terminal_skill_fingerprints', {}).setdefault(metadata['terminal_id'], {})
-    skill_id = f'terminal:{quote(skill_name, safe="")}'
-    fingerprint = hashlib.sha256(skill['content'].encode('utf-8')).hexdigest()
-    previous = fingerprints.get(skill_id)
-    if not refresh and previous is not None and previous != fingerprint:
-        raise ValueError('Skill changed while reading. Call view_skill again and restart reading.')
-    fingerprints[skill_id] = fingerprint
-    return skill
 
 
 async def get_terminal_skill(

@@ -608,6 +608,32 @@
 	let queuedReload = false;
 	let pendingUpsertChats = [];
 
+	$: visiblePageSize = isProject ? 3 : 5;
+	let visibleItemCount = 0;
+	$: if (!open || visibleItemCount === 0) visibleItemCount = visiblePageSize;
+	$: childFolders = (folders[folderId]?.childrenIds ?? [])
+		.map((id) => folders[id])
+		.filter(Boolean)
+		.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+	$: visibleChats = (chats ?? []).slice(0, Math.max(0, visibleItemCount - childFolders.length));
+	$: if (open) {
+		const newFolderIndex = childFolders.findIndex((folder) => folder.new);
+		if (newFolderIndex >= visibleItemCount) {
+			visibleItemCount = Math.ceil((newFolderIndex + 1) / visiblePageSize) * visiblePageSize;
+		}
+	}
+
+	const showMoreItems = async () => {
+		if (chatsLoading) return;
+		const targetCount = visibleItemCount + visiblePageSize;
+		while (open && childFolders.length + (chats?.length ?? 0) < targetCount && hasMoreChats) {
+			const previousPage = chatsPage;
+			await setFolderItems(true);
+			if (chatsPage === previousPage) break;
+		}
+		if (open) visibleItemCount = targetCount;
+	};
+
 	export const setFolderItems = async (append = false) => {
 		if (open && chatsLoading) {
 			if (!append) {
@@ -1034,41 +1060,30 @@
 				<div
 					class="ml-3 pl-1 mt-[0.0625rem] flex flex-col overflow-y-auto scrollbar-hidden border-s border-gray-100 dark:border-gray-900"
 				>
-					{#if folders[folderId]?.childrenIds}
-						{@const children = folders[folderId]?.childrenIds
-							.map((id) => folders[id])
-							.sort((a, b) =>
-								a.name.localeCompare(b.name, undefined, {
-									numeric: true,
-									sensitivity: 'base'
-								})
-							)}
-
-						{#if children.length > 0}
-							<div role="list">
-								{#each children as childFolder (`${folderId}-${childFolder.id}`)}
-									<svelte:self
-										bind:folderRegistry
-										{folders}
-										folderId={childFolder.id}
-										{shiftKey}
-										parentDragged={dragged}
-										{onItemMove}
-										{onDelete}
-										{onFolderUnreadCounts}
-										on:import={(e) => {
-											dispatch('import', e.detail);
-										}}
-										on:update={(e) => {
-											dispatch('update', e.detail);
-										}}
-										on:change={(e) => {
-											dispatch('change', e.detail);
-										}}
-									/>
-								{/each}
-							</div>
-						{/if}
+					{#if childFolders.length > 0}
+						<div role="list">
+							{#each childFolders.slice(0, visibleItemCount) as childFolder (`${folderId}-${childFolder.id}`)}
+								<svelte:self
+									bind:folderRegistry
+									{folders}
+									folderId={childFolder.id}
+									{shiftKey}
+									parentDragged={dragged}
+									{onItemMove}
+									{onDelete}
+									{onFolderUnreadCounts}
+									on:import={(e) => {
+										dispatch('import', e.detail);
+									}}
+									on:update={(e) => {
+										dispatch('update', e.detail);
+									}}
+									on:change={(e) => {
+										dispatch('change', e.detail);
+									}}
+								/>
+							{/each}
+						</div>
 					{/if}
 
 					{#if chats === null && chatsLoading}
@@ -1089,9 +1104,9 @@
 						</div>
 					{/if}
 
-					{#if (chats ?? []).length > 0}
+					{#if visibleChats.length > 0}
 						<div role="list">
-							{#each chats ?? [] as chat (chat.id)}
+							{#each visibleChats as chat (chat.id)}
 								<div role="listitem">
 									<ChatItem
 										id={chat.id}
@@ -1125,11 +1140,12 @@
 						</div>
 					{/if}
 
-					{#if hasMoreChats}
+					{#if childFolders.length + (chats?.length ?? 0) > visibleItemCount || hasMoreChats}
 						<button
+							type="button"
 							class="w-full px-2 py-0.5 text-left text-[0.6875rem] text-gray-400 transition hover:text-gray-700 disabled:cursor-not-allowed dark:text-gray-600 dark:hover:text-gray-300"
 							disabled={chatsLoading}
-							on:click={() => setFolderItems(true)}
+							on:click={showMoreItems}
 						>
 							{#if chatsLoading}
 								<div class="flex gap-1 px-2 py-1.5" aria-label={$i18n.t('Loading')}>
@@ -1143,7 +1159,7 @@
 									></span>
 								</div>
 							{:else}
-								{$i18n.t('Show more')}
+								{$i18n.t('Click to show more')}
 							{/if}
 						</button>
 					{/if}

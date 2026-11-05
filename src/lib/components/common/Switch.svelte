@@ -10,7 +10,7 @@
 	export let id = '';
 	export let ariaLabelledbyId = '';
 	export let ariaLabel = '';
-	export let tooltip = false;
+	export let tooltip: boolean | string = false;
 	export let inherited = false;
 
 	const i18n: any = getContext('i18n');

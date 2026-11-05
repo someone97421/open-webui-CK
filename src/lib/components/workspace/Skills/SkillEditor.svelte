@@ -26,6 +26,13 @@
 	import { updateSkillAccessGrants } from '$lib/apis/skills';
 	import { goto, beforeNavigate } from '$app/navigation';
 	import SkillFiles from './SkillFiles.svelte';
+	import SkillMetadata from './SkillMetadata.svelte';
+	import SkillBindings from './SkillBindings.svelte';
+	const normalizeMeta = (value: Record<string, any> = {}) => ({
+		...value,
+		modes: { chat: true, assistant: true, project: true, ...value.modes },
+		requires: Array.isArray(value.requires) ? value.requires : []
+	});
 	import VersionDiff from '../common/VersionDiff.svelte';
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import {
@@ -34,18 +41,26 @@
 		getSkillVersion,
 		setProductionSkillVersion,
 		getSkillById,
-		createNewSkill,
 		exportSkillBundle,
 		skillRequest,
 		skillError
 	} from '$lib/apis/skills';
 	import { downloadSkillBlob as saveAs } from '$lib/apis/skills';
+	import { getSkillPackage, createSkillPackage, exportSkillPackage, skillFileBlob, skillPackageEditUrl, skillPackageQuery, type SkillPackageContext, type SkillFile } from '$lib/apis/skills';
 
 	export let onSubmit: Function;
 	export let edit = false;
 	export let skill: any = null;
 	export let clone = false;
 	export let disabled = false;
+	export let packageContext: SkillPackageContext = {};
+	$: terminal = skill?.source === 'terminal' || packageContext.source === 'terminal';
+	const terminalFiles = async () => ({ files: (skill?.files ?? []).map((file: SkillFile) => ({ path: file.path, size: skillFileBlob(file).size, encoding: file.encoding })) });
+	const terminalFile = async (path: string) => {
+		const file = skill?.files?.find((file: SkillFile) => file.path === path);
+		if (!file) throw new Error('文件不存在');
+		return skillFileBlob(file);
+	};
 
 	const i18n = getContext<any>('i18n');
 
@@ -77,7 +92,7 @@
 	let showDeleteVersion = false;
 	let deleteVersionId: string | null = null;
 	let discardAction = () => {};
-	$: historical = edit && versionId !== currentVersionId;
+	$: historical = !terminal && edit && versionId !== currentVersionId;
 	$: readOnly = disabled || historical;
 	$: dirty = fileDirty || (!!baseline && baseline !== JSON.stringify({ name, description, meta }));
 	const remember = () => {
@@ -154,7 +169,7 @@
 			const entry = await getSkillVersion(localStorage.token, id, selected);
 			name = entry.snapshot.name;
 			description = entry.snapshot.description || '';
-			meta = entry.snapshot.meta || {};
+			meta = normalizeMeta(entry.snapshot.meta || {});
 			versionId = selected;
 			selectedCommitMessage = entry.commit_message || '';
 			reloadKey++;
@@ -166,9 +181,17 @@
 	};
 	const reload = async () => {
 		try {
-			const latest = await getSkillById(localStorage.token, id);
+			const latest = terminal ? await getSkillPackage(localStorage.token, id, packageContext) : await getSkillById(localStorage.token, id);
 			currentVersionId = latest.version_id;
-			await selectVersion(latest.version_id);
+			if (terminal) {
+				skill = latest;
+				name = latest.name;
+				description = latest.description || '';
+				meta = normalizeMeta(latest.meta);
+				versionId = latest.version_id;
+				reloadKey++;
+				remember();
+			} else await selectVersion(latest.version_id);
 			conflict = false;
 		} catch (error) {
 			toast.error(skillError(error));
@@ -200,8 +223,8 @@
 	const exportVersion = async (format: 'json' | 'zip' | 'skill') => {
 		try {
 			saveAs(
-				await exportSkillBundle(localStorage.token, format, [id], versionId!),
-				`${id}-${versionId?.slice(0, 7)}.${format}`
+				terminal ? await exportSkillPackage(localStorage.token, id, format, packageContext) : await exportSkillBundle(localStorage.token, format, [id], versionId!),
+				`${terminal ? name : id}-${versionId?.slice(0, 7)}.${format}`
 			);
 		} catch (error) {
 			toast.error(skillError(error));
@@ -210,16 +233,16 @@
 	const saveCopy = async () => {
 		try {
 			const suffix = uuidv4().slice(0, 7);
-			const result = await createNewSkill(localStorage.token, {
-				id: `${id}-${suffix}`,
+			const result = await createSkillPackage(localStorage.token, {
+				id: `${slugify(name)}-${suffix}`,
 				name: `${name} (${suffix})`,
 				description,
 				meta,
 				files: await fileEditor.getFiles(),
 				access_grants: []
-			});
+			}, packageContext);
 			remember();
-			await goto(`/workspace/skills/edit?id=${result.id}`);
+			await goto(skillPackageEditUrl(result.id, packageContext));
 			window.location.reload();
 		} catch (error) {
 			toast.error(skillError(error));
@@ -274,7 +297,7 @@
 				conflict = false;
 				remember();
 				if (showHistory) await loadHistory();
-				if (!edit) await goto(`/workspace/skills/edit?id=${result.id}`);
+				if (!edit) await goto(skillPackageEditUrl(result.id, packageContext));
 			}
 		} catch (error) {
 			if ((error as any)?.code === 'version_conflict') conflict = true;
@@ -286,7 +309,7 @@
 
 	onMount(async () => {
 		if (skill) {
-			meta = structuredClone(skill.meta ?? {});
+			meta = normalizeMeta(structuredClone(skill.meta ?? {}));
 			name = skill.name || '';
 			await tick();
 			id = skill.id || '';
@@ -296,9 +319,10 @@
 			versionId = currentVersionId;
 			accessGrants = skill?.access_grants === undefined ? [] : skill?.access_grants;
 		}
+		meta = normalizeMeta(meta);
 		remember();
 		const requestedVersion = new URLSearchParams(location.search).get('version_id');
-		if (edit && (requestedVersion || versionId))
+		if (!terminal && edit && (requestedVersion || versionId))
 			await selectVersion(requestedVersion || versionId!);
 		ready = true;
 	});
@@ -357,14 +381,17 @@
 					class="flex h-6 w-fit shrink-0 items-center gap-1 whitespace-nowrap rounded-md text-xs text-gray-400 transition-colors duration-75 hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
 					type="button"
 					on:click={() => {
-						goto('/workspace/skills');
+						goto(`/workspace/skills?${skillPackageQuery(packageContext)}`);
 					}}
 				>
 					<ChevronLeft className="size-3" strokeWidth="2" />
 					<span>{$i18n.t('Back')}</span>
 				</button>
+				<Tooltip content={skill?.location ?? (terminal ? `Terminal · ${packageContext.terminal_id ?? ''} · ${packageContext.project_id ?? packageContext.chat_id ?? '全局'}` : 'Workspace')} className="min-w-0 flex-1">
+					<span class="block truncate px-2 text-xs text-gray-400">{terminal ? 'Terminal' : 'Workspace'}{skill?.scope === 'project' || packageContext.project_id ? ' · 项目' : skill?.scope === 'chat' || packageContext.chat_id ? ' · 对话' : ''}</span>
+				</Tooltip>
 				<div class="flex shrink-0 items-center gap-1 pr-0.5">
-					{#if edit && skill?.id}<CommentButton
+					{#if edit && skill?.id && !terminal}<CommentButton
 							onComment={(request) => (comments = request)}
 							wrapperClassName="me-2"
 							resource={{ resource_type: 'skill', resource_id: skill.id }}
@@ -374,7 +401,7 @@
 						translatedLocales={Object.keys(meta.i18n ?? {})}
 					/>
 
-					{#if !disabled}
+					{#if !disabled && !terminal}
 						{#if $user?.permissions?.sharing?.skills || $user?.role === 'admin'}
 							<AccessButton
 								on:click={() => {
@@ -383,7 +410,7 @@
 								}}
 							/>
 						{/if}
-					{:else}
+					{:else if disabled}
 						<span class="rounded-lg bg-gray-100 px-2 py-1 text-xs text-gray-500 dark:bg-gray-850">
 							{$i18n.t('Read Only')}
 						</span>
@@ -444,6 +471,10 @@
 					{/if}
 				</div>
 			</div>
+			<SkillMetadata bind:meta disabled={readOnly} />
+			{#if edit && ready}
+				<SkillBindings skillId={id} {skill} requirements={meta.requires} modes={meta.modes} savedModes={skill?.meta?.modes ?? {}} disabled={historical} />
+			{/if}
 
 			{#if conflict}<div
 					role="alert"
@@ -484,6 +515,8 @@
 						{reloadKey}
 						initialContent={content}
 						initialFiles={skill?.files || null}
+						listFiles={terminal && edit ? terminalFiles : null}
+						readFile={terminal && edit ? terminalFile : null}
 						{readOnly}
 						bind:dirty={fileDirty}
 						initialPath={new URLSearchParams(location.search).get('path') || 'SKILL.md'}
@@ -493,7 +526,7 @@
 							($user?.role === 'admin' || $user?.permissions?.workspace?.skills_export)}
 					>
 						{#snippet version()}
-							{#if edit}
+							{#if edit && !terminal}
 								<div class="min-w-0">
 									<Dropdown
 										bind:show={showHistory}
@@ -590,6 +623,8 @@
 										</div>
 									</Dropdown>
 								</div>
+							{:else if edit && terminal}
+								<Tooltip content="Terminal Skill 不提供版本历史"><button type="button" disabled class="px-2 text-xs text-gray-400 opacity-50">版本历史</button></Tooltip>
 							{/if}
 						{/snippet}
 						{#snippet exports()}
@@ -632,12 +667,12 @@
 
 			{#if !readOnly}
 				<div class="flex shrink-0 justify-end gap-3 py-2">
-					<input
+					{#if !terminal}<input
 						class="min-w-0 flex-1 bg-transparent px-2 text-xs outline-hidden"
 						placeholder={$i18n.t('Describe this change')}
 						aria-label={$i18n.t('Commit message')}
 						bind:value={commitMessage}
-					/>
+					/>{/if}
 					<button
 						class="flex h-7 items-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs text-white transition hover:bg-black disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
 						type="submit"

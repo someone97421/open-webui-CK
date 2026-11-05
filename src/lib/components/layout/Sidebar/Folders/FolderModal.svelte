@@ -13,6 +13,7 @@
 	import { user, config, models, terminalServers } from '$lib/stores';
 	import ModelSelector from '$lib/components/chat/ModelSelector/Selector.svelte';
 	import ProjectAgentsEditor from '$lib/components/chat/Placeholder/ProjectAgentsEditor.svelte';
+	import FolderAttachmentDefaults from '$lib/components/chat/FolderAttachmentDefaults.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
 	import { getFolderById } from '$lib/apis/folders';
@@ -232,6 +233,19 @@
 					/>
 				</div>
 
+				{#if show && !initializing && (!folderId || folder)}
+					<FolderAttachmentDefaults
+						{folderId}
+						parentId={folder?.parent_id ?? parentId}
+						project={projectMode}
+						terminalId={projectTerminalId}
+						modelIds={data.model_ids}
+						bind:skillIds={data.skill_ids}
+						bind:toolIds={data.tool_ids}
+						disabled={loading || projectArchived}
+					/>
+				{/if}
+
 				{#if projectMode}
 					<div class="my-2">
 						<label for="project-terminal" class="mb-1 block text-xs text-gray-500">项目 Terminal</label>
@@ -239,7 +253,7 @@
 							id="project-terminal"
 							class="h-8 w-full rounded-lg border border-gray-100 bg-transparent px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-gray-300 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-800 dark:focus-visible:ring-gray-700"
 							bind:value={projectTerminalId}
-							disabled={loading || initializing || agentsSaving || projectArchived || projectTerminals.length === 0}
+							disabled={!!folderId || loading || initializing || agentsSaving || projectArchived || projectTerminals.length === 0}
 							required
 							title="项目会话固定使用此 Terminal"
 						>

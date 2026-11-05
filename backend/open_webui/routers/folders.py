@@ -35,6 +35,7 @@ from open_webui.utils.access_control import (
 from open_webui.utils.access_control.files import can_read_all_folder_files, get_accessible_folder_files
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.projects import get_project_for_folder, project_config, validate_project_terminal
+from open_webui.utils.skill_policy import folder_attachments, skill_available, validate_attachment_defaults
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -162,6 +163,37 @@ async def validate_project_update(request: Request, user, folder, data: dict, db
             await validate_project_terminal(request, user, project['terminal_id'])
 
 
+async def validate_skill_binding(request, user, skill_id, effective, db=None):
+    from open_webui.utils.skill_packages import get_package, parse_terminal_package_id
+
+    if skill_id.startswith('terminal:'):
+        terminal_id, scope, scope_id, _ = parse_terminal_package_id(skill_id)
+        if (
+            scope != 'project' or scope_id != effective.get('project_id')
+            or terminal_id != effective.get('terminal_id')
+        ):
+            raise HTTPException(400, 'Terminal Skill 只能挂载到所属项目')
+    skill = await get_package(request, user, skill_id, db=db)
+    if not skill_available(skill, effective['mode'], terminal_available=bool(effective.get('terminal_id'))):
+        raise HTTPException(400, 'Skill 未启用或不适用于该分组模式')
+
+
+async def validate_new_skill_defaults(request, user, data, *, folder=None, parent_id=None, db=None):
+    if not data or not isinstance(data.get('skill_ids'), list):
+        return
+    effective = await folder_attachments(folder.id if folder else parent_id, user, db)
+    previous = set(effective['skill_ids'])
+    added = [id for id in data['skill_ids'] if id not in previous]
+    if not added:
+        return
+    effective['mode'] = 'assistant' if effective['mode'] == 'chat' else effective['mode']
+    project = validate_project_data(data)
+    if project:
+        effective.update(mode='project', terminal_id=project['terminal_id'], project_id=folder.id if folder else None)
+    for skill_id in added:
+        await validate_skill_binding(request, user, skill_id, effective, db)
+
+
 # Get Folders
 
 
@@ -235,7 +267,9 @@ async def create_folder(
     db: AsyncSession = Depends(get_async_session),
 ):
     await check_folders_permission(request, user, db=db)
+    validate_attachment_defaults(form_data.data)
     project = validate_project_data(form_data.data)
+    await validate_new_skill_defaults(request, user, form_data.data, parent_id=form_data.parent_id, db=db)
     if project:
         if form_data.parent_id:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='项目只能位于顶层')
@@ -381,6 +415,81 @@ async def get_shared_folders(
     return results
 
 
+@router.get('/skill-bindings')
+async def get_skill_bindings(
+    request: Request, skill_id: str = Query(...), user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    await check_folders_permission(request, user, db=db)
+    owned = await Folders.get_folders_by_user_id(user.id, db=db)
+    shared = await get_shared_folders(request, user, db)
+    ids = list(dict.fromkeys([folder.id for folder in owned] + [folder['id'] for folder in shared]))
+    items = []
+    for id in ids:
+        folder = await Folders.get_folder_by_id(id, db=db)
+        if not folder:
+            continue
+        try:
+            effective = await folder_attachments(id, user, db)
+        except HTTPException as error:
+            if error.status_code not in (404, 409):
+                raise
+            continue
+        writable = user.role == 'admin' or await _has_folder_access(user.id, folder, 'write', db)
+        items.append({
+            'id': id, 'name': folder.name, 'mode': effective['mode'],
+            'project_id': effective['project_id'], 'terminal_id': effective['terminal_id'],
+            'write_access': writable, 'bound': skill_id in effective['skill_ids'],
+            'inherited': effective['skill_source_id'] not in (None, id),
+            'source_id': effective['skill_source_id'],
+        })
+    return {'items': items}
+
+
+@router.get('/{id}/attachments')
+async def get_folder_attachments(
+    request: Request, id: str, user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    await check_folders_permission(request, user, db=db)
+    return await folder_attachments(id, user, db)
+
+
+class SkillBindingForm(BaseModel):
+    skill_id: str
+    enabled: bool
+
+
+@router.post('/{id}/skill-binding')
+async def set_skill_binding(
+    request: Request, id: str, form_data: SkillBindingForm, user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    await check_folders_permission(request, user, db=db)
+    folder = await Folders.get_folder_by_id(id, db=db)
+    require_project_owner(folder, user)
+    if not folder or (user.role != 'admin' and not await _has_folder_access(user.id, folder, 'write', db)):
+        raise HTTPException(404, '分组不存在或不可编辑')
+    if project_config(folder) and (project_config(folder).get('archived') or project_config(folder).get('deleting')):
+        raise HTTPException(409, '项目已归档或正在删除')
+    effective = await folder_attachments(id, user, db)
+    ids = effective['skill_ids']
+    if form_data.enabled == (form_data.skill_id in ids):
+        return folder
+    if form_data.enabled:
+        await validate_skill_binding(request, user, form_data.skill_id, effective, db)
+        ids = list(dict.fromkeys([*ids, form_data.skill_id]))
+    else:
+        ids = [skill_id for skill_id in ids if skill_id != form_data.skill_id]
+    updated = await Folders.update_folder_by_id_and_user_id(
+        id, folder.user_id, FolderUpdateForm(data={**(folder.data or {}), 'skill_ids': ids}), db=db,
+    )
+    if not updated:
+        raise HTTPException(400, '保存 Skill 挂载失败')
+    await publish_event(request, EVENTS.FOLDER_UPDATED, actor=user, subject_id=id, data={'name': folder.name})
+    return updated
+
+
 # Get Folders By Id
 
 
@@ -444,8 +553,10 @@ async def update_folder_name_by_id(
             )
 
     if folder:
+        validate_attachment_defaults(form_data.data)
         if form_data.data is not None and 'project' in form_data.data:
             await validate_project_update(request, user, folder, form_data.data, db)
+        await validate_new_skill_defaults(request, user, form_data.data, folder=folder, db=db)
 
         if (
             user.role != 'admin'

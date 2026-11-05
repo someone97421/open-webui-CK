@@ -66,7 +66,7 @@ export const getFolders = async (token: string = '') => {
 	return res;
 };
 
-export const getFolderById = async (token: string, id: string) => {
+export const getFolderById = async (token: string, id: string, allowMissing = false) => {
 	let error = null;
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/folders/${id}`, {
@@ -78,6 +78,7 @@ export const getFolderById = async (token: string, id: string) => {
 		}
 	})
 		.then(async (res) => {
+			if (allowMissing && res.status === 404) return null;
 			if (!res.ok) throw await res.json();
 			return res.json();
 		})
@@ -376,4 +377,25 @@ export const getSharedFolderChats = async (
 	}
 
 	return res;
+};
+
+export type FolderAttachments = {
+	mode: 'assistant' | 'project';
+	skill_ids: string[];
+	tool_ids: string[];
+	skill_source_id: string | null;
+	tool_source_id: string | null;
+	project_id: string | null;
+	terminal_id: string | null;
+};
+
+export const getFolderAttachments = async (token: string, id: string): Promise<FolderAttachments> => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/folders/${encodeURIComponent(id)}/attachments`, {
+		headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
+	});
+	if (!res.ok) {
+		const error = await res.json();
+		throw Object.assign(new Error(typeof error.detail === 'string' ? error.detail : JSON.stringify(error.detail ?? error)), { status: res.status });
+	}
+	return res.json();
 };

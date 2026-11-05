@@ -2355,10 +2355,14 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     sources = []
 
     from open_webui.utils.projects import get_project_for_folder, require_project_access, validate_project_terminal
+    from open_webui.utils.skill_policy import (
+        attachment_overrides, folder_attachments, resolve_attachments, skill_available, string_ids,
+    )
 
     chat_id = metadata.get('chat_id')
     folder_id = None
     project = None
+    saved_chat = None
     if user and is_saved_chat_id(chat_id):
         saved_chat = await Chats.get_accessible_chat_by_id(chat_id, user, permission='write')
         if not saved_chat and await Chats.is_chat_owner(chat_id, user.id):
@@ -2373,9 +2377,26 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             raise HTTPException(status_code=409, detail='项目会话需要先保存到项目')
     project_settings = None
     if project:
+        terminal_capability = (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('terminal', True)
+        if not terminal_capability:
+            raise HTTPException(status_code=403, detail='模型未启用 Terminal 能力，不能在项目（Agent 模式）中调用')
         project_settings = await require_project_access(user, project)
         await validate_project_terminal(request, user, project_settings['terminal_id'])
+    try:
+        attachment_defaults = await folder_attachments(folder_id if user else None, user)
+    except HTTPException as error:
+        if error.status_code != 404 or not saved_chat or project:
+            raise
+        folder_id = None
+        attachment_defaults = await folder_attachments(None, user)
     metadata['folder_id'] = folder_id
+    metadata['skill_mode'] = attachment_defaults['mode']
+    metadata['skill_project_id'] = attachment_defaults['project_id']
+    overrides = attachment_overrides(form_data.pop(
+        'attachment_overrides',
+        (saved_chat.chat or {}).get('attachment_overrides') if saved_chat else None,
+    ))
+    metadata['attachment_overrides'] = overrides
 
     if folder_id and user:
         folder = await Folders.get_folder_by_id(folder_id)
@@ -2551,7 +2572,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                         append=True,
                     )
 
-    tool_ids = form_data.pop('tool_ids', None)
+    model_tool_defaults = model.get('info', {}).get('meta', {}).get('toolIds')
+    if model_tool_defaults is None:
+        model_tool_defaults = ((user.settings.ui or {}) if user.settings else {}).get('tools')
+    tool_ids = resolve_attachments(
+        [*string_ids(model_tool_defaults), *attachment_defaults['tool_ids']],
+        form_data.pop('tool_ids', None), overrides, 'tools',
+    )
     terminal_id = form_data.pop('terminal_id', None)
     if harness_chat or project_settings:
         tool_ids = [item for item in (tool_ids or []) if not item.startswith('terminal:')]
@@ -2563,6 +2590,27 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     files = form_data.pop('files', None)
     form_data.pop('folder_id', None)
     metadata['terminal_id'] = terminal_id
+    skill_capabilities = dict(model.get('info', {}).get('meta', {}).get('capabilities') or {})
+    skill_capabilities['terminal'] = bool(terminal_id) and skill_capabilities.get('terminal', True)
+    skill_capabilities['builtin_tools'] = use_builtin_tools
+    skill_builtin_categories = model.get('info', {}).get('meta', {}).get('builtinTools') or {}
+    for feature, config_key in (
+        ('web_search', 'web.search.enable'),
+        ('image_generation', 'image_generation.enable'),
+        ('code_interpreter', 'code_interpreter.enable'),
+    ):
+        skill_capabilities[feature] = bool(
+            skill_capabilities.get(feature, True)
+            and features.get(feature, False)
+            and (not use_builtin_tools or skill_builtin_categories.get(feature, True))
+            and await Config.get(config_key)
+            and (user.role == 'admin' or await has_permission(
+                user.id, f'features.{feature}', await Config.get('user.permissions'),
+            ))
+        )
+    if project:
+        skill_capabilities['code_interpreter'] = False
+    metadata['skill_capabilities'] = skill_capabilities
     can_author_skills = (
         use_builtin_tools
         and (model.get('info', {}).get('meta', {}).get('builtinTools') or {}).get('skills', True)
@@ -2609,23 +2657,32 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     mentioned_skill_ids = set(chat_context.get('mentioned_skill_ids') or []) | extract_skill_ids_from_messages(
         form_data.get('messages', [])
     )
-    activated_skill_ids = set(form_data.pop('skill_ids', None) or []) | mentioned_skill_ids
-    skill_ids = sorted(activated_skill_ids | set(model.get('info', {}).get('meta', {}).get('skillIds', [])))
+    excluded_skill_ids = set(overrides['skills']['removed']) if overrides else set()
+    mentioned_skill_ids -= excluded_skill_ids
+    selected_skill_ids = resolve_attachments(
+        [*string_ids(model.get('info', {}).get('meta', {}).get('skillIds')), *attachment_defaults['skill_ids']],
+        form_data.pop('skill_ids', None), overrides, 'skills',
+    )
+    activated_skill_ids = set(selected_skill_ids) | mentioned_skill_ids
+    skill_ids = sorted(activated_skill_ids)
     if payload_tools is None and await Config.get('skills.lazy_loading.enable', False):
         activated_skill_ids = mentioned_skill_ids
     available_skills = []
     terminal_skills = []
+    terminal_alias_map = {}
 
     model_builtin_tools = model.get('info', {}).get('meta', {}).get('builtinTools') or {}
 
     if skill_ids or (use_builtin_tools and model_builtin_tools.get('skills', True)):
         from open_webui.models.skills import Skills as SkillsModel
         from open_webui.utils.skill_files import format_skill_content, skill_overview
+        from open_webui.utils.skill_packages import (
+            load_terminal_tool_package, scope_terminal_skill, terminal_skill_aliases,
+        )
         from open_webui.utils.terminals import (
             format_terminal_skill_context,
             format_terminal_skill_manifest_entry,
             get_terminal_json,
-            get_terminal_skill,
         )
 
         terminal_skill_prefix = 'terminal:'
@@ -2640,7 +2697,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
         for sid in db_skill_ids:
             skill = accessible_skills.get(sid)
-            if skill and skill.is_active:
+            if skill and skill.id not in excluded_skill_ids and skill_available(
+                skill, metadata['skill_mode'], skill_capabilities, bool(terminal_id),
+            ):
                 available_skills.append(skill)
 
         skill_manifest = ''
@@ -2685,32 +2744,45 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 )
 
         listed = (
-            await get_terminal_json(request, user, metadata, '/skills', extra_params)
-            if terminal_id or terminal_skill_ids
-            else None
+            await get_terminal_json(request, user, metadata, '/skills/packages', extra_params)
+            if terminal_id and skill_capabilities['terminal'] else None
         )
-
-        listed_terminal_skills = listed if isinstance(listed, list) else []
-
-        if terminal_id and use_builtin_tools and model_builtin_tools.get('skills', True):
-            terminal_skills = listed_terminal_skills
-        elif terminal_skill_ids:
-            terminal_skill_map = {skill['id']: skill for skill in listed_terminal_skills}
-            terminal_skills = [skill for sid in terminal_skill_ids if (skill := terminal_skill_map.get(sid))]
+        if listed is None and terminal_id and skill_capabilities['terminal']:
+            listed = await get_terminal_json(request, user, metadata, '/skills', extra_params)
+        listed_terminal_skills = listed.get('items', []) if isinstance(listed, dict) else listed if isinstance(listed, list) else []
+        scoped_terminal_skills = []
+        for skill in listed_terminal_skills:
+            item = scope_terminal_skill(skill, metadata)
+            aliases = terminal_skill_aliases(skill, metadata)
+            for alias in aliases:
+                terminal_alias_map.setdefault(alias, item['id'])
+            if not aliases.intersection(excluded_skill_ids) and skill_available(
+                item, metadata['skill_mode'], skill_capabilities, bool(terminal_id),
+            ):
+                scoped_terminal_skills.append(item)
+        activated_skill_ids = {terminal_alias_map.get(sid, sid) for sid in activated_skill_ids}
+        mentioned_skill_ids = {terminal_alias_map.get(sid, sid) for sid in mentioned_skill_ids}
+        selected_terminal_ids = {terminal_alias_map.get(sid, sid) for sid in terminal_skill_ids}
+        terminal_skills = [
+            skill for skill in scoped_terminal_skills
+            if (use_builtin_tools and model_builtin_tools.get('skills', True)) or skill['id'] in selected_terminal_ids
+        ]
+        metadata['skill_ids'] = [*[skill.id for skill in available_skills], *[skill['id'] for skill in terminal_skills]]
 
         for skill in terminal_skills:
             sid = skill['id']
             if sid in activated_skill_ids or not use_builtin_tools or not model_builtin_tools.get('skills', True):
-                skill_name = unquote(sid.removeprefix(terminal_skill_prefix))
-                loaded = await get_terminal_skill(
-                    request,
-                    user.model_dump(),
-                    metadata,
-                    skill_name,
-                    extra_params,
-                    overview=True,
-                    tools_enabled=use_builtin_tools and model_builtin_tools.get('skills', True),
-                )
+                loaded = await load_terminal_tool_package(request, user, metadata, sid, extra_params)
+                if loaded:
+                    location = (loaded.get('location') or loaded.get('path') or '').replace('\\', '/')
+                    resources = [file['path'] for file in loaded['files'] if file['path'] != 'SKILL.md']
+                    loaded = {
+                        **loaded, 'directory': location.rsplit('/', 1)[0] if '/' in location else location,
+                        **await skill_overview(
+                            loaded['content'], resources, 'resources',
+                            use_builtin_tools and model_builtin_tools.get('skills', True),
+                        ),
+                    }
                 if loaded:
                     form_data['messages'] = add_or_update_system_message(
                         format_terminal_skill_context(
@@ -2731,8 +2803,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     # Strip only resolved skill mentions; ordinary text such as Perl's <$fh> stays intact.
     resolved_skill_ids = {s.id for s in available_skills} | {s['id'] for s in terminal_skills}
+    skill_ids = sorted(resolved_skill_ids)
+    metadata['skill_aliases'] = {
+        alias: sid for alias, sid in terminal_alias_map.items() if sid in resolved_skill_ids
+    }
     chat_context['mentioned_skill_ids'] = sorted(mentioned_skill_ids & resolved_skill_ids)
-    strip_skill_mentions(form_data.get('messages', []), resolved_skill_ids)
+    strip_skill_mentions(form_data.get('messages', []), resolved_skill_ids | set(metadata['skill_aliases']))
 
     prompt = get_last_user_message(form_data['messages'])
 

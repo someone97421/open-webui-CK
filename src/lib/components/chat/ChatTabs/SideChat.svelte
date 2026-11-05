@@ -1,5 +1,11 @@
 <script lang="ts">
-	import { getContext, onMount, tick } from 'svelte';
+	import { getContext, setContext, onMount, tick } from 'svelte';
+	import { writable, readable } from 'svelte/store';
+	import { skills, tools, terminalSkills } from '$lib/stores';
+	import { loadSkillCatalog } from '../skillCatalog';
+	import { getTools } from '$lib/apis/tools';
+	import { attachmentOverrides, effectiveAttachments, updateAttachmentDelta, skillAvailable, toolAvailable, scopedSkills, defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
+	import { runtimeAttachmentCapabilities } from '$lib/utils/skillPolicy';
 	import { v4 as uuidv4 } from 'uuid';
 	import {
 		socket,
@@ -62,6 +68,38 @@
 	let params: Record<string, any> = { ...$settings.params };
 	let selectedToolIds: string[] = [];
 	let selectedSkillIds: string[] = [];
+	let attachment_overrides = attachmentOverrides();
+	let previousSkills: string[] = [];
+	let previousTools: string[] = [];
+	const attachmentPolicy = writable<AttachmentPolicy>(defaultAttachmentPolicy);
+	setContext('attachmentPolicy', attachmentPolicy);
+	setContext('chatMode', readable({ project: null, ready: true }));
+	$: sideModel = $models.find((model) => model.id === sideModelId);
+	$: attachmentCaps = runtimeAttachmentCapabilities(sideModel ? [sideModel] : [], $config, $user, 'chat',
+		{ web_search: webSearchEnabled, image_generation: imageGenerationEnabled, code_interpreter: codeInterpreterEnabled },
+		params, !!$socket?.id);
+	$: attachmentPolicy.set({ mode: 'chat', capabilities: attachmentCaps, terminalAvailable: false,
+		skillSources: Object.fromEntries((sideModel?.info?.meta?.skillIds ?? []).map((id) => [id, '模型默认'])),
+		toolSources: Object.fromEntries((sideModel?.info?.meta?.toolIds ?? []).map((id) => [id, '模型默认'])) });
+	$: {
+		attachment_overrides = {
+			version: 1,
+			skills: updateAttachmentDelta(attachment_overrides.skills, previousSkills, selectedSkillIds),
+			tools: updateAttachmentDelta(attachment_overrides.tools, previousTools, selectedToolIds)
+		};
+		const catalog = scopedSkills($skills ?? [], $terminalSkills ?? []);
+		previousSkills = effectiveAttachments(sideModel?.info?.meta?.skillIds ?? [], attachment_overrides.skills)
+			.filter((id) => skillAvailable(catalog.find((skill) => skill.id === id), 'chat', attachmentCaps, false));
+		previousTools = effectiveAttachments(sideModel?.info?.meta?.toolIds ?? ($settings as any)?.tools ?? [], attachment_overrides.tools)
+			.filter((id) => toolAvailable(($tools ?? []).find((tool) => tool.id === id) ??
+				(id.startsWith('direct_server:') && ($toolServers ?? []).some((server, index) => String(index) === id.slice('direct_server:'.length) || server.id === id.slice('direct_server:'.length)) ? { id } : null), attachmentCaps));
+		selectedSkillIds = previousSkills;
+		selectedToolIds = previousTools;
+	}
+	onMount(() => {
+		if ($skills === null) void loadSkillCatalog(localStorage.token).then((result) => skills.set(result.items)).catch(() => {});
+		if ($tools === null) void getTools(localStorage.token).then((items) => tools.set(items)).catch(() => {});
+	});
 	let selectedFilterIds: string[] = [];
 	let webSearchEnabled = false;
 	let imageGenerationEnabled = false;
@@ -293,15 +331,15 @@
 			files: requestFiles,
 			tool_ids: selectedToolIds.filter((id) => !id.startsWith('direct_server:')),
 			skill_ids: selectedSkillIds,
+			attachment_overrides,
 			filter_ids: selectedFilterIds,
-			terminal_id: $config?.features?.enable_tool_servers ? $selectedTerminalId : undefined,
+			terminal_id: undefined,
 			tool_servers: $config?.features?.enable_tool_servers
 				? [
 						...($toolServers ?? []).filter(
 							(server: any, index) =>
 								directServers.includes(String(index)) || directServers.includes(server.id)
 						),
-						...($terminalServers ?? []).filter((server) => !server.id)
 					]
 				: [],
 			features: {

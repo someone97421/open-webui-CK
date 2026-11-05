@@ -23,6 +23,8 @@
 
 	import { onDestroy, onMount, tick, getContext, createEventDispatcher } from 'svelte';
 	import { readable, type Readable } from 'svelte/store';
+	import { skillAvailable, toolAvailable, scopedSkills, defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
+	const attachmentPolicy = getContext<Readable<AttachmentPolicy>>('attachmentPolicy') ?? readable(defaultAttachmentPolicy);
 
 	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
 	import { pickAndDownloadFile } from '$lib/utils/onedrive-file-picker';
@@ -916,12 +918,12 @@
 		.reduce((acc, filters) => acc.filter((f1) => filters.some((f2) => f2.id === f1.id)));
 
 	let showToolsButton = false;
-	$: showToolsButton = ($tools ?? []).length > 0 || ($toolServers ?? []).length > 0;
+	$: showToolsButton = ($tools ?? []).some((tool) => toolAvailable(tool, $attachmentPolicy.capabilities)) ||
+		(toolAvailable({ id: 'direct_server:0' }, $attachmentPolicy.capabilities) && ($toolServers ?? []).length > 0);
 
 	let showSkillsButton = false;
-	$: showSkillsButton =
-		($skills ?? []).some((skill) => skill.is_active) ||
-		($terminalSkills ?? []).some((skill) => skill.is_active);
+	$: showSkillsButton = scopedSkills($skills ?? [], $terminalSkills ?? []).some((skill) =>
+		skillAvailable(skill, $attachmentPolicy.mode, $attachmentPolicy.capabilities, $attachmentPolicy.terminalAvailable));
 
 	let showWebSearchButton = false;
 	$: showWebSearchButton =
@@ -938,7 +940,7 @@
 	let showCodeInterpreterButton = false;
 	$: showCodeInterpreterButton =
 		!$chatMode?.project &&
-		!$selectedTerminalId &&
+		($chatMode ? !$chatMode.project : !$selectedTerminalId) &&
 		selectedModelIds.length === codeInterpreterCapableModels.length &&
 		$config?.features?.enable_code_interpreter &&
 		($_user.role === 'admin' || $_user?.permissions?.features?.code_interpreter);
@@ -1713,6 +1715,7 @@
 				},
 				render: getSuggestionRenderer(CommandSuggestionList, {
 					i18n,
+					attachmentPolicy,
 					canCompact: () => !!history?.currentId && contextCompactionEnabled,
 					compactDisabled: () => isActive,
 					canStatus: () => !!history?.currentId,
@@ -1744,6 +1747,7 @@
 					onCreateSkill: createSkillHandler,
 					onSelect: (e) => {
 						const { type, data } = e;
+						if (type === 'skill' && skillAvailable(data, $attachmentPolicy.mode, $attachmentPolicy.capabilities, $attachmentPolicy.terminalAvailable)) selectedSkillIds = [...new Set([...selectedSkillIds, data.id])];
 
 						if (type === 'model') {
 							atSelectedModel = data;
@@ -1819,7 +1823,9 @@
 				char: '$',
 				render: getSuggestionRenderer(CommandSuggestionList, {
 					i18n,
+					attachmentPolicy,
 					onSelect: (e) => {
+						if (e.type === 'skill' && skillAvailable(e.data, $attachmentPolicy.mode, $attachmentPolicy.capabilities, $attachmentPolicy.terminalAvailable)) selectedSkillIds = [...new Set([...selectedSkillIds, e.data.id])];
 						focus({ preventScroll: true });
 					},
 

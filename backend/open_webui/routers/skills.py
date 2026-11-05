@@ -5,7 +5,7 @@ import mimetypes
 import re
 import zipfile
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response
@@ -37,6 +37,10 @@ from open_webui.utils.skill_files import (
     load_skill_from_url,
     parse_import,
     zip_export,
+)
+from open_webui.utils.skill_packages import (
+    archive_policies, parse_terminal_package_id, portable_archive, restore_portable_policy,
+    terminal_item, terminal_package_request, workspace_item,
 )
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -861,3 +865,250 @@ async def import_skills(
                 }
             )
     return results
+
+
+
+
+async def package_context(request, user, terminal_id=None, project_id=None, chat_id=None):
+    if project_id and chat_id:
+        raise HTTPException(400, 'project_id 与 chat_id 请选择一个明确上下文')
+    if project_id:
+        from open_webui.models.folders import Folders
+        from open_webui.utils.projects import require_project_access
+        config = await require_project_access(user, await Folders.get_folder_by_id(project_id), allow_archived=request.method == 'GET')
+        if terminal_id and terminal_id != config['terminal_id']:
+            raise HTTPException(409, '项目只能使用绑定的 Terminal')
+        terminal_id = config['terminal_id']
+    return terminal_id, project_id, chat_id
+
+
+async def package_reference_context(request, user, id, terminal_id=None, project_id=None, chat_id=None):
+    selected_terminal, scope, scope_id, path = parse_terminal_package_id(id)
+    if terminal_id and terminal_id != selected_terminal:
+        raise HTTPException(409, 'Skill ID 与所选 Terminal 不一致')
+    if project_id and (scope != 'project' or project_id != scope_id):
+        raise HTTPException(409, 'Skill ID 与所选项目不一致')
+    if chat_id and scope == 'chat' and chat_id != scope_id:
+        raise HTTPException(409, 'Skill ID 与所选聊天不一致')
+    if scope == 'project' and not chat_id:
+        project_id = scope_id
+    elif scope == 'chat':
+        chat_id = chat_id or scope_id
+    terminal_id, project_id, chat_id = await package_context(request, user, selected_terminal, project_id, chat_id)
+    return terminal_id, project_id, chat_id, scope, scope_id, path
+
+
+@router.get('/packages')
+async def list_skill_packages(
+    request: Request, terminal_id: str | None = None, project_id: str | None = None,
+    chat_id: str | None = None, query: str | None = None,
+    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session),
+):
+    skills = await Skills.get_skills(user_id=None if user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL else user.id, db=db)
+    items = [await workspace_item(skill, user, db) for skill in skills]
+    statuses = []
+    if terminal_id or project_id:
+        try:
+            terminal_id, project_id, chat_id = await package_context(request, user, terminal_id, project_id, chat_id)
+            result = await terminal_package_request(request, user, terminal_id, project_id=project_id, chat_id=chat_id)
+            terminal_items = [terminal_item(item, terminal_id, expected_scope='project' if project_id else None, expected_scope_id=project_id) for item in result['items']]
+            items.extend(terminal_items)
+            statuses.append({'source': 'terminal', 'terminal_id': terminal_id, 'available': True})
+            statuses.extend({'source': 'terminal', 'terminal_id': terminal_id, **entry} for entry in result.get('statuses', []))
+        except HTTPException as error:
+            statuses.append({'source': 'terminal', 'terminal_id': terminal_id, 'available': False, 'status_code': error.status_code, 'detail': error.detail})
+        except (ValueError, TypeError, KeyError):
+            statuses.append({'source': 'terminal', 'terminal_id': terminal_id, 'available': False, 'status_code': 502, 'detail': 'Terminal 返回了无效的 Skill 包列表'})
+    elif chat_id:
+        statuses.append({'source': 'terminal', 'available': False, 'detail': '请选择聊天使用的 Terminal'})
+    if query:
+        items = [item for item in items if query.casefold() in item['name'].casefold()]
+    return {'items': items, 'total': len(items), 'statuses': statuses}
+
+
+@router.get('/packages/detail')
+async def get_skill_package(
+    request: Request, id: str = Query(...), version_id: str | None = None,
+    terminal_id: str | None = None, project_id: str | None = None, chat_id: str | None = None,
+    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session),
+):
+    if not id.startswith('terminal:'):
+        return await workspace_item(await authorized_skill(id, user, db=db), user, db, detail=True, version_id=version_id)
+    if version_id:
+        raise HTTPException(400, 'Terminal Skill 不保存历史版本')
+    terminal_id, project_id, chat_id, scope, scope_id, path = await package_reference_context(request, user, id, terminal_id, project_id, chat_id)
+    result = await terminal_package_request(request, user, terminal_id, project_id=project_id, chat_id=chat_id, path='/skills/packages/detail?' + urlencode({'id': path}))
+    return terminal_item(result, terminal_id, expected_scope=scope, expected_scope_id=scope_id)
+
+
+def package_form(data, id, current=None):
+    from open_webui.models.skills import SkillMeta
+    current = current or {}
+    result = {key: current[key] for key in ('name', 'description', 'meta', 'is_active') if key in current}
+    result.update(data)
+    meta = {**(current.get('meta') or {}), **(data.get('meta') or {})}
+    if 'modes' in data:
+        meta['modes'] = data['modes']
+    if 'requires' in data or 'requirements' in data:
+        meta['requires'] = data.get('requires', data.get('requirements'))
+    if isinstance(meta.get('modes'), dict):
+        meta['modes'] = {**((current.get('meta') or {}).get('modes') or {}), **meta['modes']}
+    result.update(id=id, meta=SkillMeta.model_validate(meta).model_dump())
+    return SkillForm.model_validate(result)
+
+
+@router.post('/packages')
+async def create_skill_package(
+    request: Request, form_data: dict, source: str = 'workspace', terminal_id: str | None = None,
+    project_id: str | None = None, chat_id: str | None = None, package_path: str | None = None,
+    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session),
+):
+    try:
+        form = package_form(form_data, str(form_data.get('id') or ''))
+        if source == 'workspace':
+            return await workspace_item(await create_new_skill(request, form, user, db), user, db, detail=True)
+        if source != 'terminal':
+            raise HTTPException(400, 'source 必须为 workspace 或 terminal')
+        terminal_id, project_id, chat_id = await package_context(request, user, terminal_id, project_id, chat_id)
+        if not terminal_id:
+            raise HTTPException(400, '创建 Terminal Skill 需要 terminal_id 或 project_id')
+        if not re.fullmatch(r'[a-z0-9_-]+', form.id):
+            raise HTTPException(400, '创建 Skill 需要小写 slug ID')
+        if form.files is not None and form.data is not None:
+            raise HTTPException(400, 'files 与 data 只能提供一个')
+        path = package_path or '.agents/skills/' + form.id
+        from open_webui.utils.skill_files import apply_operations, validate_files
+        files = form.data.model_dump(exclude_none=True)['files'] if form.data else [file.model_dump(exclude_none=True) for file in form.files] if form.files is not None else [{'path': 'SKILL.md', 'content': form.content or ''}]
+        files = apply_operations(files, form.operations) if form.operations else validate_files(files)
+        payload = {**form.model_dump(include={'name', 'description', 'meta', 'is_active'}), 'files': files}
+        result = await terminal_package_request(request, user, terminal_id, project_id=project_id, chat_id=chat_id, path='/skills/packages?' + urlencode({'id': path}), method='POST', payload=payload)
+        return terminal_item(result, terminal_id, expected_scope='project' if project_id else None, expected_scope_id=project_id)
+    except (ValueError, TypeError) as error:
+        raise HTTPException(400, str(error))
+
+
+@router.put('/packages')
+async def update_skill_package(
+    request: Request, form_data: dict, id: str = Query(...), terminal_id: str | None = None,
+    project_id: str | None = None, chat_id: str | None = None,
+    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session),
+):
+    current = await get_skill_package(request, id, None, terminal_id, project_id, chat_id, user, db)
+    if not current['write_access']:
+        raise HTTPException(403, 'Skill 包只读')
+    try:
+        form = package_form(form_data, id, current)
+        if not id.startswith('terminal:'):
+            updated = await update_skill_by_id(request, id, form, user, db)
+            return await workspace_item(updated, user, db, detail=True)
+        if not form.expected_version_id:
+            raise HTTPException(400, '保存 Terminal Skill 需要 expected_version_id')
+        from open_webui.utils.skill_files import apply_operations, validate_files
+        if sum(value is not None for value in (form.files, form.data, form.operations)) > 1:
+            raise HTTPException(400, 'files、data、operations 只能提供一个')
+        files = current['files']
+        if form.files is not None:
+            files = [file.model_dump(exclude_none=True) for file in form.files]
+        elif form.data is not None:
+            files = form.data.model_dump(exclude_none=True)['files']
+        elif form.operations is not None:
+            files = apply_operations(files, form.operations)
+        if form.content is not None:
+            files = [file for file in files if file['path'] != 'SKILL.md'] + [{'path': 'SKILL.md', 'content': form.content}]
+        files = validate_files(files)
+        terminal_id, project_id, chat_id, scope, scope_id, path = await package_reference_context(request, user, id, terminal_id, project_id, chat_id)
+        payload = {**form.model_dump(include={'name', 'description', 'meta', 'is_active', 'expected_version_id'}), 'files': files}
+        result = await terminal_package_request(request, user, terminal_id, project_id=project_id, chat_id=chat_id, path='/skills/packages?' + urlencode({'id': path}), method='PUT', payload=payload)
+        return terminal_item(result, terminal_id, expected_scope=scope, expected_scope_id=scope_id)
+    except (ValueError, TypeError) as error:
+        raise HTTPException(400, str(error))
+
+
+@router.delete('/packages')
+async def delete_skill_package(
+    request: Request, id: str = Query(...), expected_version_id: str | None = None,
+    terminal_id: str | None = None, project_id: str | None = None, chat_id: str | None = None,
+    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session),
+):
+    if not id.startswith('terminal:'):
+        return await delete_skill_by_id(request, id, user, db)
+    current = await get_skill_package(request, id, None, terminal_id, project_id, chat_id, user, db)
+    if not current['write_access']:
+        raise HTTPException(403, 'Skill 包只读')
+    if not expected_version_id:
+        raise HTTPException(400, '删除 Terminal Skill 需要 expected_version_id')
+    terminal_id, project_id, chat_id, scope, scope_id, path = await package_reference_context(request, user, id, terminal_id, project_id, chat_id)
+    return await terminal_package_request(request, user, terminal_id, project_id=project_id, chat_id=chat_id, path='/skills/packages?' + urlencode({'id': path, 'expected_version_id': expected_version_id}), method='DELETE')
+
+
+@router.post('/packages/import/preview')
+async def preview_skill_packages(files: list[UploadFile] = File(...), user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session)):
+    await require_import(user, db)
+    try:
+        if len(files) > 10000:
+            raise ValueError('Too many uploaded files')
+        packages, folder_files, total = [], [], 0
+        for upload in files:
+            raw = await upload.read(MAX_IMPORT_BYTES - total + 1)
+            total += len(raw)
+            if total > MAX_IMPORT_BYTES:
+                raise ValueError('Import exceeds 200 MiB')
+            await upload.seek(0)
+            if '/' in (upload.filename or ''):
+                folder_files.append(upload)
+                continue
+            imported = await read_import([upload])
+            policies = archive_policies(raw, upload.filename or '')
+            if policies is not None:
+                if len(policies) != len(imported):
+                    raise ValueError('Skill 导出元数据与包数量不一致')
+                imported = [
+                    {**package, **{key: policy[key] for key in ('name', 'description', 'meta', 'is_active') if key in policy}}
+                    for package, policy in zip(imported, policies)
+                ]
+            packages.extend(imported)
+        if folder_files:
+            packages.extend(await read_import(folder_files))
+        if sum(len(file_bytes(file)) for package in packages for file in package['files']) > MAX_IMPORT_BYTES:
+            raise ValueError('Import exceeds 200 MiB decoded')
+        return [restore_portable_policy(package) for package in packages]
+    except (ValueError, TypeError, zipfile.BadZipFile) as error:
+        raise HTTPException(400, str(error))
+
+
+@router.post('/packages/import')
+async def import_skill_packages(
+    request: Request, files: list[UploadFile] = File(...), source: str = 'workspace',
+    terminal_id: str | None = None, project_id: str | None = None, chat_id: str | None = None,
+    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session),
+):
+    packages = await preview_skill_packages(files, user, db)
+    items, errors = [], []
+    for package in packages:
+        try:
+            if str(package['id']).startswith('terminal:'):
+                package['id'] = re.sub(r'[^a-z0-9_-]+', '-', package['name'].lower()).strip('-') or 'imported-skill'
+            items.append(await create_skill_package(request, package, source, terminal_id, project_id, chat_id, None, user, db))
+        except HTTPException as error:
+            errors.append({'id': package.get('id'), 'status_code': error.status_code, 'detail': error.detail})
+    return {'items': items, 'total': len(items), 'errors': errors}
+
+
+@router.get('/packages/export')
+async def export_skill_packages(
+    request: Request, id: str = Query(...), format: str = 'json', version_id: str | None = None,
+    terminal_id: str | None = None, project_id: str | None = None, chat_id: str | None = None,
+    user=Depends(get_verified_user), db: AsyncSession = Depends(get_async_session),
+):
+    if user.role != 'admin' and not await has_permission(user.id, 'workspace.skills_export', await Config.get('user.permissions'), db=db):
+        raise HTTPException(403, 'Export permission required')
+    package = await get_skill_package(request, id, version_id, terminal_id, project_id, chat_id, user, db)
+    if format == 'json':
+        return {key: package[key] for key in ('id', 'name', 'description', 'meta', 'is_active', 'files')}
+    if format not in ('zip', 'skill'):
+        raise HTTPException(400, 'format 必须为 json、zip 或 skill')
+    try:
+        filename, archive = portable_archive(package)
+        return Response(archive, media_type='application/zip', headers={'Content-Disposition': f'attachment; filename="{filename}.{format}"'})
+    except ValueError as error:
+        raise HTTPException(400, str(error))
