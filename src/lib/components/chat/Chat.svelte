@@ -5228,7 +5228,7 @@
 		codeInterpreterEnabled
 	});
 
-	const saveDraft = async (draft: any, chatId: string | null = null, debounce = true) => {
+	const saveDraft = async (draft: any, targetChatId: string | null = null, debounce = true) => {
 		const draftChatId = $chatId;
 		await tick();
 		if (draftChatId !== $chatId) return;
@@ -5237,7 +5237,7 @@
 		}
 
 		if (draft.prompt !== null && draft.prompt.length < MAX_DRAFT_LENGTH) {
-			const key = `chat-input${chatId ? `-${chatId}` : ''}`;
+			const key = `chat-input${targetChatId ? `-${targetChatId}` : ''}`;
 			const savedDraft = { ...draft, attachment_overrides: structuredClone(attachment_overrides) };
 			const write = () => sessionStorage.setItem(key, JSON.stringify(savedDraft));
 			if (debounce) {
@@ -5246,7 +5246,7 @@
 				write();
 			}
 		} else {
-			sessionStorage.removeItem(`chat-input${chatId ? `-${chatId}` : ''}`);
+			sessionStorage.removeItem(`chat-input${targetChatId ? `-${targetChatId}` : ''}`);
 		}
 	};
 
