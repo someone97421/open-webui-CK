@@ -2,6 +2,7 @@ export type SkillMode = 'chat' | 'assistant' | 'project';
 export type AttachmentDelta = { added: string[]; removed: string[] };
 export type AttachmentOverrides = {
 	version: 1;
+	defaults?: { skills: string[]; tools: string[] };
 	skills: AttachmentDelta;
 	tools: AttachmentDelta;
 };
@@ -43,9 +44,16 @@ const ids = (value: unknown): string[] => Array.isArray(value)
 	? [...new Set(value.filter((id): id is string => typeof id === 'string' && id.length > 0))] : [];
 export const attachmentOverrides = (value?: any, legacy?: any): AttachmentOverrides => ({
 	version: 1,
+	...(value?.defaults && Array.isArray(value.defaults.skills) && Array.isArray(value.defaults.tools)
+		? { defaults: { skills: ids(value.defaults.skills), tools: ids(value.defaults.tools) } } : {}),
 	skills: { added: ids(value?.skills?.added ?? legacy?.selectedSkillIds), removed: ids(value?.skills?.removed) },
 	tools: { added: ids(value?.tools?.added ?? legacy?.selectedToolIds), removed: ids(value?.tools?.removed) }
 });
+export const freezeAttachmentDefaults = (
+	value: AttachmentOverrides, skills: string[], tools: string[]
+): AttachmentOverrides => value.defaults ? value : {
+	...value, defaults: { skills: ids(skills), tools: ids(tools) }
+};
 export const effectiveAttachments = (defaults: string[], delta: AttachmentDelta) =>
 	[...new Set([...defaults, ...delta.added])].filter((id) => !delta.removed.includes(id));
 export const updateAttachmentDelta = (delta: AttachmentDelta, previous: string[], next: string[]): AttachmentDelta => {

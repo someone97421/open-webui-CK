@@ -39,6 +39,16 @@ def attachment_overrides(value):
     if not isinstance(value, dict) or type(value.get('version')) is not int or value['version'] != 1:
         raise HTTPException(400, '无效的会话挂载配置')
     result = {'version': 1}
+    if 'defaults' in value:
+        defaults = value['defaults']
+        if not isinstance(defaults, dict):
+            raise HTTPException(400, '会话初始挂载配置必须为对象')
+        result['defaults'] = {}
+        for kind in ('skills', 'tools'):
+            items = defaults.get(kind)
+            if not isinstance(items, list) or any(not isinstance(item, str) or not item for item in items):
+                raise HTTPException(400, '会话初始挂载引用必须为非空字符串列表')
+            result['defaults'][kind] = string_ids(items)
     for kind in ('skills', 'tools'):
         entry = value.get(kind, {})
         if not isinstance(entry, dict):
@@ -53,7 +63,7 @@ def attachment_overrides(value):
 
 
 def resolve_attachments(defaults, selected, overrides, kind):
-    base = string_ids(defaults)
+    base = string_ids((overrides.get('defaults') or {}).get(kind, defaults) if overrides else defaults)
     if overrides is None:
         if kind == 'tools' and isinstance(selected, list):
             return string_ids(selected)

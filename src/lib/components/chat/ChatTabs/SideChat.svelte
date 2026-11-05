@@ -4,7 +4,7 @@
 	import { skills, tools, terminalSkills } from '$lib/stores';
 	import { loadSkillCatalog } from '../skillCatalog';
 	import { getTools } from '$lib/apis/tools';
-	import { attachmentOverrides, effectiveAttachments, updateAttachmentDelta, skillAvailable, toolAvailable, scopedSkills, defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
+	import { attachmentOverrides, freezeAttachmentDefaults, effectiveAttachments, updateAttachmentDelta, skillAvailable, toolAvailable, scopedSkills, defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
 	import { runtimeAttachmentCapabilities } from '$lib/utils/skillPolicy';
 	import { v4 as uuidv4 } from 'uuid';
 	import {
@@ -81,16 +81,16 @@
 	$: attachmentPolicy.set({ mode: 'chat', capabilities: attachmentCaps, terminalAvailable: false,
 		skillSources: Object.fromEntries((sideModel?.info?.meta?.skillIds ?? []).map((id) => [id, '模型默认'])),
 		toolSources: Object.fromEntries((sideModel?.info?.meta?.toolIds ?? []).map((id) => [id, '模型默认'])) });
-	$: {
+	$: if (sideModel) {
 		attachment_overrides = {
-			version: 1,
+			...freezeAttachmentDefaults(attachment_overrides, sideModel.info?.meta?.skillIds ?? [], sideModel.info?.meta?.toolIds ?? ($settings as any)?.tools ?? []),
 			skills: updateAttachmentDelta(attachment_overrides.skills, previousSkills, selectedSkillIds),
 			tools: updateAttachmentDelta(attachment_overrides.tools, previousTools, selectedToolIds)
 		};
 		const catalog = scopedSkills($skills ?? [], $terminalSkills ?? []);
-		previousSkills = effectiveAttachments(sideModel?.info?.meta?.skillIds ?? [], attachment_overrides.skills)
+		previousSkills = effectiveAttachments(attachment_overrides.defaults!.skills, attachment_overrides.skills)
 			.filter((id) => skillAvailable(catalog.find((skill) => skill.id === id), 'chat', attachmentCaps, false));
-		previousTools = effectiveAttachments(sideModel?.info?.meta?.toolIds ?? ($settings as any)?.tools ?? [], attachment_overrides.tools)
+		previousTools = effectiveAttachments(attachment_overrides.defaults!.tools, attachment_overrides.tools)
 			.filter((id) => toolAvailable(($tools ?? []).find((tool) => tool.id === id) ??
 				(id.startsWith('direct_server:') && ($toolServers ?? []).some((server, index) => String(index) === id.slice('direct_server:'.length) || server.id === id.slice('direct_server:'.length)) ? { id } : null), attachmentCaps));
 		selectedSkillIds = previousSkills;

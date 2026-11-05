@@ -15,6 +15,8 @@
 	import ProjectAgentsEditor from '$lib/components/chat/Placeholder/ProjectAgentsEditor.svelte';
 	import FolderAttachmentDefaults from '$lib/components/chat/FolderAttachmentDefaults.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
+	import Collapsible from '$lib/components/common/Collapsible.svelte';
+	import AdvancedParams from '$lib/components/chat/Settings/Advanced/AdvancedParams.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
 	import { getFolderById } from '$lib/apis/folders';
 	import {
@@ -37,14 +39,20 @@
 	let data: Record<string, any> = {
 		description: '',
 		model_ids: [] as string[],
+		params: {} as Record<string, any>,
+		skill_ids: [] as string[],
+		tool_ids: [] as string[],
 		system_prompt: '',
 		files: []
 	};
 
 	let loading = false;
 	let initializing = false;
+	let attachmentsLoading = true;
+	let attachmentsLoadFailed = false;
 	let showAccessModal = false;
 	let projectTerminalId = '';
+	let paramsExpanded = false;
 	let agentsExpanded = false;
 	let agentsOpened = false;
 	let agentsEditor: ProjectAgentsEditor | undefined;
@@ -64,7 +72,7 @@
 		show && sequence === modalSequence && folderId === id;
 
 	const submitHandler = async () => {
-		if (initializing || loading || agentsSaving || projectArchived || (folderId && !folder)) return;
+		if (initializing || loading || attachmentsLoading || attachmentsLoadFailed || agentsSaving || projectArchived || (folderId && !folder)) return;
 		if ((data?.files ?? []).some((file) => file.status === 'uploading')) {
 			toast.error($i18n.t('Please wait until all files are uploaded.'));
 			return;
@@ -126,11 +134,14 @@
 		const sequence = ++modalSequence;
 		initializing = isOpen;
 		loading = false;
+		attachmentsLoading = isOpen;
+		attachmentsLoadFailed = false;
 		showAccessModal = false;
 		folder = null;
 		name = '';
 		meta = { background_image_url: null };
-		data = { description: '', model_ids: [], system_prompt: '', files: [] };
+		data = { description: '', model_ids: [], params: {}, skill_ids: [], tool_ids: [], system_prompt: '', files: [] };
+		paramsExpanded = false;
 		projectTerminalId = '';
 		agentsExpanded = false;
 		agentsOpened = false;
@@ -155,7 +166,10 @@
 				files: [],
 				...folder.data,
 				description: folder.data?.description ?? '',
-				model_ids: folder.data?.model_ids ?? []
+				model_ids: folder.data?.model_ids ?? [],
+				params: structuredClone(folder.data?.params ?? {}),
+				skill_ids: folder.data?.skill_ids ?? null,
+				tool_ids: folder.data?.tool_ids ?? null
 			};
 			projectTerminalId = getFolderProject(folder)?.terminal_id ?? '';
 		} else {
@@ -233,6 +247,57 @@
 					/>
 				</div>
 
+				<div class="my-2 flex items-center justify-between gap-4">
+					<label for="model-selector-folder-default-button" class="shrink-0 text-xs text-gray-500" title="仅影响新会话，会话中可自由切换模型；清空后使用常规默认模型。">
+						{$i18n.t('Default Model')}
+					</label>
+					<div class="flex min-w-0 max-w-[65%] items-center gap-2">
+						<div class="min-w-0">
+							<ModelSelector
+								id="folder-default"
+								placeholder={$i18n.t('Use default')}
+								items={$models.filter((model) => !projectMode || model.info?.meta?.capabilities?.terminal !== false).map((model) => ({ value: model.id, label: model.name, model }))}
+								triggerClassName="text-xs"
+								placement="auto"
+								align="end"
+								selectionOnly
+								disabled={loading || initializing || projectArchived}
+								value={data.model_ids[0] ?? ''}
+								bind:values={data.model_ids}
+							/>
+						</div>
+						{#if data.model_ids.length}
+							<button type="button" aria-label={$i18n.t('Reset')} title="清空后使用常规默认模型" disabled={loading || initializing || projectArchived} class="shrink-0 rounded px-0 py-1 text-gray-500 hover:text-gray-700 focus-visible:outline focus-visible:outline-2 disabled:opacity-50 dark:hover:text-gray-200" on:click={() => (data.model_ids = [])}>
+								<XMark className="size-3" />
+							</button>
+						{/if}
+					</div>
+				</div>
+
+				{#if $user?.role === 'admin' || ($user?.permissions?.chat?.params ?? true)}
+					<fieldset
+						class="my-2 min-w-0 disabled:opacity-50"
+						aria-label="默认模型参数"
+						title="仅用于新会话初始化，会话中可自行调整模型参数。"
+						disabled={initializing || attachmentsLoading || loading || agentsSaving || projectArchived}
+					>
+						<Collapsible
+							title="默认模型参数"
+							buttonClassName="w-full rounded py-1 text-xs text-gray-500 hover:text-gray-700 focus-visible:outline focus-visible:outline-2 dark:hover:text-gray-300"
+							bind:open={paramsExpanded}
+						>
+							<div slot="content" class="mt-2 min-w-0">
+								<AdvancedParams
+									layout="grid"
+									admin={$user?.role === 'admin'}
+									custom={true}
+									bind:params={data.params}
+								/>
+							</div>
+						</Collapsible>
+					</fieldset>
+				{/if}
+
 				{#if show && !initializing && (!folderId || folder)}
 					<FolderAttachmentDefaults
 						{folderId}
@@ -242,6 +307,8 @@
 						modelIds={data.model_ids}
 						bind:skillIds={data.skill_ids}
 						bind:toolIds={data.tool_ids}
+						bind:loading={attachmentsLoading}
+						bind:loadFailed={attachmentsLoadFailed}
 						disabled={loading || projectArchived}
 					/>
 				{/if}
@@ -347,32 +414,6 @@
 
 					<hr class="my-2.5 w-full border-gray-50 dark:border-gray-850/30" />
 
-					<div class="my-1 flex items-center justify-between gap-4">
-						<label for="model-selector-folder-default-button" class="shrink-0 text-xs text-gray-500">
-							{$i18n.t('Default Model')}
-						</label>
-						<div class="flex min-w-0 max-w-[65%] items-center gap-2">
-							<div class="min-w-0">
-								<ModelSelector
-									id="folder-default"
-									placeholder={$i18n.t('Use default')}
-									items={$models.map((model) => ({ value: model.id, label: model.name, model }))}
-									triggerClassName="text-xs"
-									placement="auto"
-									align="end"
-									selectionOnly
-									value={data.model_ids[0] ?? ''}
-									bind:values={data.model_ids}
-								/>
-							</div>
-							{#if data.model_ids.length}
-								<button type="button" aria-label={$i18n.t('Reset')} class="shrink-0 px-0 py-1 text-gray-500 hover:text-gray-700 dark:hover:text-gray-200" on:click={() => (data.model_ids = [])}>
-									<XMark className="size-3" />
-								</button>
-							{/if}
-						</div>
-					</div>
-
 					{#if $user?.role === 'admin' || ($user?.permissions.chat?.system_prompt ?? true)}
 						<div class="my-1">
 							<div class="mb-2 text-xs text-gray-500">{$i18n.t('System Prompt')}</div>
@@ -400,8 +441,8 @@
 					<button
 						class="flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-gray-900 px-2.5 text-xs font-normal text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
 						type="submit"
-						disabled={loading || initializing || agentsSaving || (agentsSaveBlocked && !agentsTerminalChanged) || projectArchived || (!!folderId && !folder) || (projectMode && !projectTerminalId)}
-						title={projectArchived ? '恢复项目后可编辑设置' : agentsSaveBlocked && !agentsTerminalChanged ? 'AGENTS.md 不能超过 32 KiB' : projectMode && !projectTerminalId ? '请选择项目 Terminal' : '保存'}
+						disabled={loading || initializing || attachmentsLoading || attachmentsLoadFailed || agentsSaving || (agentsSaveBlocked && !agentsTerminalChanged) || projectArchived || (!!folderId && !folder) || (projectMode && !projectTerminalId)}
+						title={projectArchived ? '恢复项目后可编辑设置' : attachmentsLoading ? '正在加载默认配置' : attachmentsLoadFailed ? '请重新加载默认配置后保存' : agentsSaveBlocked && !agentsTerminalChanged ? 'AGENTS.md 不能超过 32 KiB' : projectMode && !projectTerminalId ? '请选择项目 Terminal' : '保存'}
 					>
 						{projectMode && !edit ? '创建项目' : $i18n.t('Save')}
 						{#if loading}<Spinner className="size-3" />{/if}

@@ -86,7 +86,7 @@
 	import { resumeTemporaryChat } from '$lib/apis';
 	import { getFolderById, getFolderAttachments, type FolderAttachments } from '$lib/apis/folders';
 	import {
-		attachmentOverrides, effectiveAttachments, updateAttachmentDelta, skillAvailable,
+		attachmentOverrides, freezeAttachmentDefaults, effectiveAttachments, updateAttachmentDelta, skillAvailable,
 		toolAvailable, scopedSkills, canonicalSkillId, canonicalSkillIds,
 		runtimeAttachmentCapabilities, defaultAttachmentPolicy, type AttachmentPolicy, type SkillMode
 	} from '$lib/utils/skillPolicy';
@@ -257,7 +257,8 @@
 
 	const normalizeSelectedModels = (modelIds: string[] = []) => {
 		const selected = resolveDefaultModelIds(
-			$models,
+			readProject($selectedFolder ?? activeFolder)
+				? $models.filter((model) => model.info?.meta?.capabilities?.terminal !== false) : $models,
 			modelIds,
 			$settings?.models,
 			$config?.default_models?.split(',')
@@ -369,6 +370,12 @@
 	let previousSkillIds: string[] = [];
 	let previousToolIds: string[] = [];
 	let attachmentsInitialized = false;
+	let defaultsFolderId: string | null | undefined;
+	let draftDefaultsKey = '';
+	const folderDefaultsKey = (folder: any) => JSON.stringify([
+		folder?.id ?? null, folder?.data?.model_ids ?? [], folder?.data?.skill_ids ?? null,
+		folder?.data?.tool_ids ?? null, folder?.data?.params ?? {}
+	]);
 	const attachmentPolicy = writable<AttachmentPolicy>(defaultAttachmentPolicy);
 	setContext('attachmentPolicy', attachmentPolicy);
 	let folderAttachments: FolderAttachments | null = null;
@@ -452,10 +459,10 @@
 		skillSources: Object.fromEntries([...modelSkillDefaults.map((id) => [canonicalSkillId(id, scopedSkills($skills ?? [], $terminalSkills ?? [])), '模型默认']), ...(folderAttachments?.skill_ids ?? []).map((id) => [canonicalSkillId(id, scopedSkills($skills ?? [], $terminalSkills ?? [])), `分组默认：${folderAttachments?.skill_source_id ?? ''}`])]),
 		toolSources: Object.fromEntries([...modelToolDefaults.map((id) => [id, '模型默认']), ...(folderAttachments?.tool_ids ?? []).map((id) => [id, `分组默认：${folderAttachments?.tool_source_id ?? ''}`])])
 	});
-	$: if (!loading && !attachmentsLoading) {
+	$: if (!loading && !folderModeError && !attachmentsLoading && selectedModelIds.some(Boolean) && attachmentModels.length === selectedModelIds.length) {
 		if (attachmentsInitialized) {
 			const next = {
-				version: 1 as const,
+				...attachment_overrides,
 				skills: updateAttachmentDelta(attachment_overrides.skills, previousSkillIds, selectedSkillIds),
 				tools: updateAttachmentDelta(attachment_overrides.tools, previousToolIds, selectedToolIds)
 			};
@@ -467,9 +474,16 @@
 			skills: { added: canonicalSkillIds(attachment_overrides.skills.added, catalog), removed: canonicalSkillIds(attachment_overrides.skills.removed, catalog) }
 		};
 		if (!equal(normalized, attachment_overrides)) attachment_overrides = normalized;
-		const nextSkills = effectiveAttachments(canonicalSkillIds([...modelSkillDefaults, ...(folderAttachments?.skill_ids ?? [])], catalog), attachment_overrides.skills)
+		const migrateLegacy = !!$chatId && chat?.id === $chatId && !attachment_overrides.defaults;
+		const frozen = freezeAttachmentDefaults(attachment_overrides,
+			canonicalSkillIds(migrateLegacy ? [...modelSkillDefaults, ...(folderAttachments?.skill_ids ?? [])]
+				: folderAttachments?.skill_source_id ? folderAttachments.skill_ids : modelSkillDefaults, catalog),
+			migrateLegacy ? [...modelToolDefaults, ...(folderAttachments?.tool_ids ?? [])]
+				: folderAttachments?.tool_source_id ? folderAttachments.tool_ids : modelToolDefaults);
+		if (!equal(frozen, attachment_overrides)) attachment_overrides = frozen;
+		const nextSkills = effectiveAttachments(canonicalSkillIds(attachment_overrides.defaults!.skills, catalog), attachment_overrides.skills)
 			.filter((id) => skillAvailable(catalog.find((skill) => skill.id === id), attachmentMode, attachmentCaps, attachmentTerminalAvailable));
-		const nextTools = effectiveAttachments([...modelToolDefaults, ...(folderAttachments?.tool_ids ?? [])], attachment_overrides.tools)
+		const nextTools = effectiveAttachments(attachment_overrides.defaults!.tools, attachment_overrides.tools)
 			.filter((id) => toolAvailable(($tools ?? []).find((tool) => tool.id === id) ??
 				(id.startsWith('direct_server:') && ($toolServers ?? []).some((server, index) => String(index) === id.slice('direct_server:'.length) || server.id === id.slice('direct_server:'.length)) ? { id } : null), attachmentCaps));
 		previousSkillIds = nextSkills;
@@ -485,6 +499,14 @@
 	let imageGenerationEnabled = false;
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
+	$: inputControls = { selectedFilterIds, webSearchEnabled, imageGenerationEnabled, codeInterpreterEnabled };
+	const restoreInputControls = (value: any) => {
+		if (!value || typeof value !== 'object') return;
+		if (Array.isArray(value.selectedFilterIds)) selectedFilterIds = [...new Set<string>(value.selectedFilterIds.filter((id: unknown): id is string => typeof id === 'string'))];
+		if (typeof value.webSearchEnabled === 'boolean') webSearchEnabled = value.webSearchEnabled;
+		if (typeof value.imageGenerationEnabled === 'boolean') imageGenerationEnabled = value.imageGenerationEnabled;
+		if (typeof value.codeInterpreterEnabled === 'boolean') codeInterpreterEnabled = !project && value.codeInterpreterEnabled;
+	};
 	let chatFolder: any = null;
 	let chatFolderChatId = '';
 	let folderModeError = false;
@@ -499,7 +521,7 @@
 		? { version: 1 as const, archived: readProject(activeFolder)?.archived ?? false, terminal_id: folderAttachments.terminal_id!, id: folderAttachments.project_id }
 		: readProject(activeFolder);
 	$: modeTerminalId = project?.terminal_id ?? null;
-	$: chatMode.set({ project, ready: !loading && !folderModeError && !attachmentsLoading });
+	$: chatMode.set({ project, ready: !loading && !folderModeError && !attachmentsLoading && attachmentsInitialized });
 	$: if ($selectedTerminalId !== modeTerminalId) selectedTerminalId.set(modeTerminalId);
 	$: if (project) {
 		if (codeInterpreterEnabled) codeInterpreterEnabled = false;
@@ -999,7 +1021,7 @@
 		});
 	};
 
-	const restoreChatInput = async (storageChatInput: string | null) => {
+	const restoreChatInput = async (storageChatInput: string | null, restoreSettings = true) => {
 		if (!storageChatInput || $temporaryChatEnabled) {
 			return false;
 		}
@@ -1009,25 +1031,17 @@
 			prompt = input.prompt ?? '';
 			messageInput?.setText(prompt);
 			files = input.files ?? [];
-			const restored = attachmentOverrides(input.attachment_overrides, input);
-			if (!input.attachment_overrides) {
-				const presets = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
-					.map((id) => $models.find((model) => model.id === id));
-				const defaultSkills = new Set([...presets.flatMap((model) => model?.info?.meta?.skillIds ?? []), ...(folderAttachments?.skill_ids ?? [])]);
-				const defaultTools = new Set([...presets.flatMap((model) => model?.info?.meta?.toolIds ?? ($settings as any)?.tools ?? []), ...(folderAttachments?.tool_ids ?? [])]);
-				restored.skills.added = restored.skills.added.filter((id) => !defaultSkills.has(id));
-				restored.tools.added = restored.tools.added.filter((id) => !defaultTools.has(id));
+			if (restoreSettings && (!input.folder_defaults_key || input.folder_defaults_key === folderDefaultsKey($selectedFolder))) {
+				if (Array.isArray(input.models)) selectedModels = normalizeSelectedModels(input.models);
+				if (input.params && typeof input.params === 'object' && !Array.isArray(input.params)) params = structuredClone(input.params);
+				if (input.attachment_overrides) {
+					attachment_overrides = attachmentOverrides(input.attachment_overrides);
+				} else if (Array.isArray(input.selectedSkillIds) || Array.isArray(input.selectedToolIds)) {
+					attachment_overrides = freezeAttachmentDefaults(attachmentOverrides(), input.selectedSkillIds ?? [], input.selectedToolIds ?? []);
+				}
+				attachmentsInitialized = false;
+				restoreInputControls(input);
 			}
-			attachment_overrides = input.attachment_overrides ? restored : {
-				version: 1,
-				skills: { ...attachment_overrides.skills, added: [...new Set([...attachment_overrides.skills.added, ...restored.skills.added])].filter((id) => !attachment_overrides.skills.removed.includes(id)) },
-				tools: { ...attachment_overrides.tools, added: [...new Set([...attachment_overrides.tools.added, ...restored.tools.added])].filter((id) => !attachment_overrides.tools.removed.includes(id)) }
-			};
-			attachmentsInitialized = false;
-			selectedFilterIds = input.selectedFilterIds ?? [];
-			webSearchEnabled = input.webSearchEnabled ?? false;
-			imageGenerationEnabled = input.imageGenerationEnabled ?? false;
-			codeInterpreterEnabled = input.codeInterpreterEnabled ?? false;
 			// Ignore approval modes in older drafts. Restoring input must not overwrite chat
 			// parameters or invoke the change handler, which can save settings and approve tools.
 			return true;
@@ -1071,9 +1085,12 @@
 	}
 
 	let saveControlsTimer;
-	$: if (!loading && !$temporaryChatEnabled && $chatId && chatFiles && attachment_overrides) {
+	$: if (!loading && !folderModeError && !attachmentsLoading && attachmentsInitialized && !$temporaryChatEnabled && chatFiles && attachment_overrides && inputControls) {
 		clearTimeout(saveControlsTimer);
-		saveControlsTimer = setTimeout(saveControls, 400);
+		const scope = $chatId || getNewChatDraftKey();
+		saveControlsTimer = setTimeout(() => {
+			if (scope === ($chatId || getNewChatDraftKey())) void saveControls();
+		}, 400);
 	}
 
 	let chatLoadController = new AbortController();
@@ -1097,7 +1114,7 @@
 		}
 
 		clearTimeout(saveControlsTimer);
-		await saveControls();
+		await saveControls(null, true);
 		if (signal.aborted) return;
 		attachment_overrides = attachmentOverrides();
 		attachmentsInitialized = false;
@@ -1128,7 +1145,7 @@
 		modelDefaults = null;
 		terminalContext = null;
 		clearTimeout(saveControlsTimer);
-		await saveControls();
+		await saveControls(null, true);
 		attachment_overrides = attachmentOverrides();
 		attachmentsInitialized = false;
 
@@ -2086,9 +2103,13 @@
 
 		const selectedFolderSubscribe = selectedFolder.subscribe(async (folder) => {
 			await tick();
-			// Folder default models apply to new chats only.
-			if (!history.currentId && folder) {
-				const folderModels = normalizeSelectedModels(folder.data?.model_ids ?? []);
+			if (!$chatId && !chatIdProp && (folder?.id ?? null) !== defaultsFolderId) {
+				defaultsFolderId = folder?.id ?? null;
+				draftDefaultsKey = folderDefaultsKey(folder);
+				params = structuredClone(folder?.data?.params ?? {});
+				attachment_overrides = attachmentOverrides();
+				attachmentsInitialized = false;
+				const folderModels = normalizeSelectedModels(folder?.data?.model_ids ?? []);
 				if (!equal(selectedModels, folderModels)) {
 					selectedModels = folderModels;
 				}
@@ -2096,7 +2117,7 @@
 		});
 
 		const storageChatInput = sessionStorage.getItem(
-			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
+			chatIdProp ? `chat-input-${chatIdProp}` : getNewChatDraftKey()
 		);
 
 		const init = async () => {
@@ -2776,8 +2797,10 @@
 		folderModeError = false;
 		modelDefaults = null;
 		clearTimeout(saveControlsTimer);
-		await saveControls();
+		await saveControls(null, true);
 		if (signal.aborted) return;
+		defaultsFolderId = $selectedFolder?.id ?? null;
+		draftDefaultsKey = folderDefaultsKey($selectedFolder);
 		attachment_overrides = attachmentOverrides();
 		attachmentsInitialized = false;
 		selectedToolIds = [];
@@ -2817,6 +2840,7 @@
 
 		const availableModels = $models
 			.filter((m) => !(m?.info?.meta?.hidden ?? false))
+			.filter((model) => !readProject($selectedFolder) || model.info?.meta?.capabilities?.terminal !== false)
 			.map((m) => m.id);
 
 		const defaultModels = normalizeSelectedModels();
@@ -2921,12 +2945,12 @@
 
 		autoScroll = true;
 
-		const chatInputPrompt = (await restoreChatInput(sessionStorage.getItem('chat-input')))
-			? prompt
-			: null;
 		const previousChatId = $chatId;
 		const previousMessageId = history.currentId;
 		await resetInput();
+		params = structuredClone($selectedFolder?.data?.params ?? {});
+		const chatInputPrompt = (await restoreChatInput(sessionStorage.getItem(getNewChatDraftKey())))
+			? prompt : null;
 		if (signal.aborted) return;
 		// A chat opened or a message sent in the meantime keeps its id and history
 		if (($chatId && $chatId !== previousChatId) || history.currentId !== previousMessageId) {
@@ -2942,7 +2966,6 @@
 		};
 
 		chatFiles = [];
-		params = {};
 		chatVariables = {};
 		taskIds = null;
 		chatTasks = [];
@@ -3244,11 +3267,13 @@
 					}
 					if (signal.aborted) return;
 					const restored = await restoreChatInput(
-						sessionStorage.getItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`)
+						sessionStorage.getItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`),
+						false
 					);
 					if (signal.aborted) return;
 					await setDefaults(restored);
 					if (signal.aborted) return;
+					if (chatContent.input_controls) restoreInputControls(chatContent.input_controls);
 					loading = false;
 					await tick();
 					if (signal.aborted) return;
@@ -4112,7 +4137,7 @@
 			bridge: bridgeRequest = null
 		}: { _raw?: boolean; bridge?: { userMessageId: string; modelId: string } | null } = {}
 	): Promise<BridgeSubmission> => {
-		if (loading || folderModeError || attachmentsLoading) return { status: 'rejected' };
+		if (loading || folderModeError || attachmentsLoading || !attachmentsInitialized) return { status: 'rejected' };
 		if (files.some((file: any) => file.type === 'filesystem' &&
 			(!project || file.terminal_id !== project.terminal_id))) {
 			toast.error('文件所属工作区与当前会话不一致，请重新上传。');
@@ -4712,6 +4737,7 @@
 				),
 				skill_ids: skillIds.length > 0 ? skillIds : undefined,
 				attachment_overrides,
+				input_controls: inputControls,
 				terminal_id: terminalEnabled && requestTerminalId ? requestTerminalId : undefined,
 				tool_servers: $config?.features?.enable_tool_servers
 					? [
@@ -5112,6 +5138,7 @@
 					title: $i18n.t('New Chat'),
 					models: selectedModels,
 					attachment_overrides,
+					input_controls: inputControls,
 					system: $settings.system ?? undefined,
 					params: params,
 					history: _history,
@@ -5170,6 +5197,7 @@
 				chat = await updateChatById(localStorage.token, _chatId, {
 					models: selectedModels,
 					attachment_overrides,
+					input_controls: inputControls,
 					history: history,
 					messages: createMessagesList(history, history.currentId),
 					files: chatFiles
@@ -5185,17 +5213,24 @@
 		});
 	};
 
-	const saveControls = async (models: string[] | null = null) => {
+	const saveControls = async (models: string[] | null = null, flush = false) => {
 		if (isShared) return;
-		if (!$chatId || $temporaryChatEnabled || chat?.id !== $chatId) return;
+		if (!attachmentsInitialized || (!flush && (loading || folderModeError || attachmentsLoading))) return;
+		if ($temporaryChatEnabled) return;
+		if (!$chatId) {
+			await saveDraft(getChatInputDraft(), null);
+			return;
+		}
+		if (chat?.id !== $chatId) return;
 		// Model choices are passed explicitly; automatic fallbacks must not be saved.
 		if (!models?.length || !models.every(Boolean)) models = null;
-		if (!models && equal(chatFiles, chat.chat?.files ?? []) && equal(attachment_overrides, chat.chat?.attachment_overrides)) return;
+		if (!models && equal(chatFiles, chat.chat?.files ?? []) && equal(attachment_overrides, chat.chat?.attachment_overrides) && equal(inputControls, chat.chat?.input_controls)) return;
 		const id = $chatId;
 
 		const res = await updateChatById(localStorage.token, id, {
 			files: chatFiles,
 			attachment_overrides,
+			input_controls: inputControls,
 			...(models ? { models } : {})
 		}).catch((err) => {
 			console.error('[controls autosave]', err);
@@ -5209,8 +5244,12 @@
 	let saveDraftTimeout: ReturnType<typeof setTimeout> | null = null;
 	// chatIdProp is empty for chats started from the home page (URL set via replaceState)
 	const getDraftChatId = () => chatIdProp || $chatId || null;
+	const getNewChatDraftKey = () => `chat-input${$selectedFolder?.id ? `-folder-${$selectedFolder.id}` : ''}`;
 
 	const getChatInputDraft = () => ({
+		folder_defaults_key: draftDefaultsKey,
+		models: selectedModels,
+		params: structuredClone(params),
 		prompt,
 		files: files
 			.filter((file) => file.type !== 'image' && !(file.file instanceof File))
@@ -5230,15 +5269,33 @@
 
 	const saveDraft = async (draft: any, targetChatId: string | null = null, debounce = true) => {
 		const draftChatId = $chatId;
+		const key = targetChatId ? `chat-input-${targetChatId}` : getNewChatDraftKey();
+		const snapshot = {
+			models: [...selectedModels],
+			controls: structuredClone(inputControls),
+			params: structuredClone(draft.params ?? params),
+			overrides: structuredClone(attachment_overrides),
+			defaultsKey: draftDefaultsKey
+		};
 		await tick();
-		if (draftChatId !== $chatId) return;
+		if (draftChatId !== $chatId || (!targetChatId && key !== getNewChatDraftKey())) return;
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
 		}
+		if (!targetChatId && !draft.prompt?.trim() && !(draft.files ?? []).length) {
+			sessionStorage.removeItem(key);
+			return;
+		}
 
 		if (draft.prompt !== null && draft.prompt.length < MAX_DRAFT_LENGTH) {
-			const key = `chat-input${targetChatId ? `-${targetChatId}` : ''}`;
-			const savedDraft = { ...draft, attachment_overrides: structuredClone(attachment_overrides) };
+			const savedDraft = {
+				...draft,
+				folder_defaults_key: snapshot.defaultsKey,
+				models: snapshot.models,
+				...snapshot.controls,
+				params: snapshot.params,
+				attachment_overrides: snapshot.overrides
+			};
 			const write = () => sessionStorage.setItem(key, JSON.stringify(savedDraft));
 			if (debounce) {
 				saveDraftTimeout = setTimeout(write, 500);
@@ -5246,7 +5303,7 @@
 				write();
 			}
 		} else {
-			sessionStorage.removeItem(`chat-input${targetChatId ? `-${targetChatId}` : ''}`);
+			sessionStorage.removeItem(key);
 		}
 	};
 
@@ -5268,7 +5325,7 @@
 		if (saveDraftTimeout) {
 			clearTimeout(saveDraftTimeout);
 		}
-		await sessionStorage.removeItem(`chat-input${chatId ? `-${chatId}` : ''}`);
+		await sessionStorage.removeItem(chatId ? `chat-input-${chatId}` : getNewChatDraftKey());
 	};
 
 	const moveChatHandler = async (chatId, folderId) => {

@@ -1267,6 +1267,7 @@ async def chat_completion(
             'session_id': form_data.pop('session_id', None),
             'automation_id': automation_id,
             'folder_id': form_data.pop('folder_id', None),
+            'input_controls': form_data.pop('input_controls', None),
             'filter_ids': form_data.pop('filter_ids', []),
             'tool_ids': form_data.get('tool_ids', None),
             'tool_servers': tool_servers,
@@ -1407,6 +1408,17 @@ async def chat_completion(
                                 assistant_message['modelIdx'] = entry['modelIdx']
                             history_messages[assistant_message_id] = assistant_message
 
+                    chat_defaults = {
+                        key: metadata[key]
+                        for key in ('input_controls',)
+                        if isinstance(metadata.get(key), dict)
+                    }
+                    if form_data.get('attachment_overrides') is not None:
+                        from open_webui.utils.skill_policy import attachment_overrides as parse_attachment_overrides
+
+                        overrides = parse_attachment_overrides(form_data['attachment_overrides'])
+                        metadata['attachment_overrides'] = overrides
+                        chat_defaults['attachment_overrides'] = overrides
                     await Chats.insert_new_chat(
                         chat_id,
                         user.id,
@@ -1425,6 +1437,7 @@ async def chat_completion(
                                 if user_message_id
                                 else [],
                                 'files': metadata.get('files') or [],
+                                **chat_defaults,
                                 'tags': [],
                                 'timestamp': int(time.time() * 1000),
                             },
