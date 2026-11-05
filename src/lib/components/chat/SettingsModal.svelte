@@ -4,8 +4,10 @@
 		buildSettingsSearchIndex,
 		getSettingsSearchMatch,
 		normalizeSettingsSearch,
+		searchSettingsEntries,
 		searchSettingsTabs,
-		type SettingsTab
+		type SettingsTab,
+		type SettingsSearchResult
 	} from '$lib/utils/settings-search';
 	import { browser } from '$app/environment';
 	import { getContext, tick } from 'svelte';
@@ -380,6 +382,7 @@
 	let filteredPersonalSettings: string[] = [];
 	let filteredAdminSettings: string[] = [];
 
+	let searchResults: SettingsSearchResult[] = [];
 	let search = '';
 	let showSearch = false;
 	let searchInput: HTMLInputElement;
@@ -446,41 +449,40 @@
 		user: $user,
 		config: $config
 	});
+	$: searchResults = searchSettingsEntries(searchIndex, search);
 	$: filteredSettings = searchSettingsTabs(searchIndex, search);
 	$: filteredPersonalSettings = filteredSettings.filter((id) => !isAdminTab(id));
 	$: filteredAdminSettings = filteredSettings.filter(isAdminTab);
 
 	let settingsPanel: HTMLDivElement;
 	let highlightedSetting: HTMLElement | null = null;
-	let highlightedLabel: HTMLElement | null = null;
 	let searchNavigation = 0;
-	const settingHighlightClasses = [
-		'rounded-xl',
-		'bg-yellow-200/90',
-		'ring-2',
-		'ring-yellow-400',
-		'dark:bg-yellow-400/25',
-		'dark:ring-yellow-300',
-		'shadow-[0_0_0_5px_rgba(250,204,21,0.28)]'
-	];
-	const labelHighlightClasses = ['!font-bold', '!text-yellow-950', 'dark:!text-yellow-50'];
 
 	const clearSearchHighlight = () => {
-		highlightedSetting?.classList.remove(...settingHighlightClasses);
-		highlightedLabel?.classList.remove(...labelHighlightClasses);
+		highlightedSetting?.classList.remove('settings-search-highlight');
 		highlightedSetting = null;
-		highlightedLabel = null;
 	};
+	$: if (!search.trim()) {
+		searchNavigation += 1;
+		clearSearchHighlight();
+	}
 
-	const findSearchTarget = (tabId: string) => {
-		const match = getSettingsSearchMatch(searchIndex, tabId, search);
+	const getSearchEntry = (tabId: string, key: string | null = null) =>
+		key
+			? (searchIndex
+					.find((tab) => tab.id === tabId)
+					?.entries.find((entry) => entry.key === key) ?? null)
+			: getSettingsSearchMatch(searchIndex, tabId, search);
+
+	const findSearchTarget = (tabId: string, key: string | null = null) => {
+		const match = getSearchEntry(tabId, key);
 		if (!settingsPanel || !match?.labels.length) return null;
 
 		const scoreText = (text: string) => {
 			const normalized = normalizeSettingsSearch(text);
 			if (!normalized) return 2;
 			if (match.labels.some((label) => normalized === label)) return 0;
-			if (match.labels.some((label) => normalized.includes(label) || label.includes(normalized)))
+			if (match.labels.some((label) => normalized.includes(label)))
 				return 1;
 			return 2;
 		};
@@ -488,6 +490,7 @@
 		const markedTargets = Array.from(
 			settingsPanel.querySelectorAll<HTMLElement>('[data-settings-search-target]')
 		)
+			.filter((element) => element.getClientRects().length > 0)
 			.map((element) => ({
 				element,
 				score: scoreText(element.getAttribute('data-settings-search-target') ?? '')
@@ -495,10 +498,7 @@
 			.filter(({ score }) => score < 2)
 			.sort((a, b) => a.score - b.score);
 		if (markedTargets.length) {
-			return {
-				target: markedTargets[0].element,
-				label: markedTargets[0].element.querySelector<HTMLElement>('label')
-			};
+			return { target: markedTargets[0].element };
 		}
 
 		const textElements = Array.from(
@@ -518,15 +518,14 @@
 			target:
 				labelElement.closest<HTMLElement>('[data-settings-search-target]') ??
 				labelElement.parentElement ??
-				labelElement,
-			label: labelElement
+				labelElement
 		};
 	};
 
-	const highlightSearchResult = async (tabId: string) => {
+	const highlightSearchResult = async (tabId: string, key: string | null = null) => {
 		const navigation = ++searchNavigation;
 		clearSearchHighlight();
-		if (!getSettingsSearchMatch(searchIndex, tabId, search)?.key) return;
+		if (!getSearchEntry(tabId, key)?.key) return;
 
 		await tick();
 		let result: ReturnType<typeof findSearchTarget> = null;
@@ -534,7 +533,7 @@
 
 		for (let attempt = 0; attempt < 40; attempt += 1) {
 			if (navigation !== searchNavigation || selectedTab !== tabId) return;
-			result = findSearchTarget(tabId);
+			result = findSearchTarget(tabId, key);
 			if (result?.target) break;
 
 			if (!expanded) {
@@ -550,9 +549,7 @@
 
 		if (navigation !== searchNavigation || selectedTab !== tabId || !result?.target) return;
 		highlightedSetting = result.target;
-		highlightedLabel = result.label ?? null;
-		highlightedSetting.classList.add(...settingHighlightClasses);
-		highlightedLabel?.classList.add(...labelHighlightClasses);
+		highlightedSetting.classList.add('settings-search-highlight');
 		highlightedSetting.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
 	};
 
@@ -564,6 +561,12 @@
 			searchNavigation += 1;
 			clearSearchHighlight();
 		}
+	};
+
+	const selectSearchResult = (result: SettingsSearchResult) => {
+		if (!availableSettings.some((tab) => tab.id === result.tabId)) return;
+		selectedTab = result.tabId;
+		void highlightSearchResult(result.tabId, result.entry.key);
 	};
 
 	const toggleSearch = async () => {
@@ -581,7 +584,8 @@
 			else toggleSearch();
 		} else if (event.key === 'Enter') {
 			event.preventDefault();
-			if (filteredSettings.length) selectTab(filteredSettings[0]);
+			if (searchResults.length) selectSearchResult(searchResults[0]);
+			else if (filteredSettings.length) selectTab(filteredSettings[0]);
 		}
 	};
 
@@ -716,15 +720,52 @@
 
 		<div class="sr-only" role="status" aria-live="polite">
 			{search
-				? filteredSettings.length
-					? $i18n.t('Matching tabs: {{count}}', { count: filteredSettings.length })
-					: $i18n.t('No matches')
+				? searchResults.length
+					? `${$i18n.t('Search results')}: ${searchResults.length}`
+					: filteredSettings.length
+						? $i18n.t('Matching tabs: {{count}}', { count: filteredSettings.length })
+						: $i18n.t('No matches')
 				: ''}
 		</div>
 
 		<div
 			class="tabs scrollbar-none max-h-32 md:max-h-none flex min-w-0 flex-1 min-h-0 overflow-x-auto md:overflow-x-hidden md:overflow-y-auto md:flex-col p-1 pl-0 md:pl-1 gap-px"
 		>
+			{#if search.trim()}
+				<div class="px-2 pb-1 pt-1 text-[0.625rem] text-gray-600 dark:text-gray-500">
+					{$i18n.t('Search results')}{searchResults.length ? ` (${searchResults.length})` : ''}
+				</div>
+				{#each searchResults as result (`${result.tabId}:${result.entry.key}`)}
+					{@const tab = availableSettings.find((setting) => setting.id === result.tabId)}
+					<button
+						type="button"
+						class="flex w-full flex-col items-start gap-0.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-gray-50 dark:hover:bg-white/[0.04]"
+						title={`${result.entry.label} · ${tab?.title ?? ''}`}
+						on:click={() => selectSearchResult(result)}
+					>
+						<span class="text-xs text-gray-800 dark:text-gray-200">{result.entry.label}</span>
+						<span class="text-[0.625rem] text-gray-500 dark:text-gray-500">
+							{isAdminTab(result.tabId) ? $i18n.t('Admin') : $i18n.t('Personal')} · {tab?.title}
+						</span>
+					</button>
+				{:else}
+					{#each filteredSettings as tabId (tabId)}
+						{@const tab = availableSettings.find((setting) => setting.id === tabId)}
+						<button
+							type="button"
+							class="w-full rounded-lg px-2 py-1.5 text-left text-xs text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/[0.04]"
+							on:click={() => selectTab(tabId)}
+						>
+							{tab?.title}
+						</button>
+					{/each}
+					{#if filteredSettings.length === 0}
+						<div class="px-2 py-1 text-xs text-gray-600 dark:text-gray-500">
+							{$i18n.t('No matches')}
+						</div>
+					{/if}
+				{/each}
+			{:else}
 			<span
 				class="hidden md:block text-[0.625rem] text-gray-600 dark:text-gray-500 px-2 mt-1.5 mb-0.5"
 			>
@@ -958,6 +999,7 @@
 					{$i18n.t('No matches')}
 				</div>
 			{/if}
+			{/if}
 		</div>
 	</nav>
 
@@ -1091,3 +1133,17 @@
 		</div>
 	</div>
 </Modal>
+
+<style>
+	:global(.settings-search-highlight) {
+		border-radius: 4px;
+		background-color: rgba(14, 165, 233, 0.06);
+		outline: 1px solid rgba(14, 165, 233, 0.3);
+		outline-offset: 4px;
+	}
+
+	:global(.dark .settings-search-highlight) {
+		background-color: rgba(56, 189, 248, 0.1);
+		outline-color: rgba(56, 189, 248, 0.3);
+	}
+</style>

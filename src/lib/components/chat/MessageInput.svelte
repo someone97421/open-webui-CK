@@ -87,6 +87,7 @@
 	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL, PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
 	import { matchKeybinding, Shortcut } from '$lib/shortcuts';
 	import { resolveLocalizedModelName } from '$lib/utils/localizedContent';
+	import { isProjectModelCompatible } from '$lib/utils/projects';
 
 	import { createNoteHandler } from '../notes/utils';
 	import { getSuggestionRenderer } from '../common/RichTextInput/suggestions';
@@ -188,6 +189,13 @@
 	export let selectedModels: string[];
 	export let multipleModels = true;
 	export let onModelSelect: (models: string[]) => void = () => {};
+
+	const selectMentionModel = (model: Model | undefined) => {
+		if (model && ($attachmentPolicy.mode !== 'project' ||
+			isProjectModelCompatible($models.find((item) => item.id === model.id)))) {
+			atSelectedModel = model;
+		}
+	};
 	export let chatFiles: any[] = [];
 	export let params: Record<string, any> = {};
 	export let onParamChange: (key: string, value: unknown) => void = () => {};
@@ -1541,9 +1549,7 @@
 				} else if (data.type === 'model' && data.id) {
 					// Find the model from the store and set as @-selected model
 					const model = $models.find((m) => m.id === data.id);
-					if (model) {
-						atSelectedModel = model;
-					}
+					selectMentionModel(model);
 					dragged = false;
 					e.stopPropagation();
 					return;
@@ -1621,12 +1627,13 @@
 				char: '@',
 				render: getSuggestionRenderer(CommandSuggestionList, {
 					i18n,
+					attachmentPolicy,
 					fileUploadEnabled: () => fileUploadEnabled,
 					onSelect: (e) => {
 						const { type, data } = e;
 
 						if (type === 'model') {
-							atSelectedModel = data;
+							selectMentionModel(data);
 						}
 
 						focus({ preventScroll: true });
@@ -1752,7 +1759,7 @@
 						if (type === 'skill' && skillAvailable(data, $attachmentPolicy.mode, $attachmentPolicy.capabilities, $attachmentPolicy.terminalAvailable)) selectedSkillIds = [...new Set([...selectedSkillIds, data.id])];
 
 						if (type === 'model') {
-							atSelectedModel = data;
+							selectMentionModel(data);
 						}
 
 						focus({ preventScroll: true });
@@ -1791,7 +1798,7 @@
 						const { type, data } = e;
 
 						if (type === 'model') {
-							atSelectedModel = data;
+							selectMentionModel(data);
 						}
 
 						focus({ preventScroll: true });
@@ -2933,6 +2940,7 @@
 										<ModelSelector
 											bind:this={modelSelector}
 											multipleEnabled={multipleModels}
+											projectMode={$attachmentPolicy.mode === 'project'}
 											bind:selectedModels
 											{onModelSelect}
 											showSetDefault={!history?.currentId}

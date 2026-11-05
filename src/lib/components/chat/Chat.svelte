@@ -91,7 +91,7 @@
 		runtimeAttachmentCapabilities, defaultAttachmentPolicy, type AttachmentPolicy, type SkillMode
 	} from '$lib/utils/skillPolicy';
 	import { loadSkillCatalog } from './skillCatalog';
-	import { getFolderProject } from '$lib/utils/projects';
+	import { getFolderProject, isProjectModelCompatible } from '$lib/utils/projects';
 	import {
 		applyResponseStreamEvent,
 		getOutputText,
@@ -255,10 +255,12 @@
 	let serverContextUsage = null;
 	let contextUsage = null;
 
-	const normalizeSelectedModels = (modelIds: string[] = []) => {
+	const normalizeSelectedModels = (
+		modelIds: string[] = [],
+		projectMode = !!readProject($selectedFolder ?? activeFolder)
+	) => {
 		const selected = resolveDefaultModelIds(
-			readProject($selectedFolder ?? activeFolder)
-				? $models.filter((model) => model.info?.meta?.capabilities?.terminal !== false) : $models,
+			projectMode ? $models.filter(isProjectModelCompatible) : $models,
 			modelIds,
 			$settings?.models,
 			$config?.default_models?.split(',')
@@ -276,7 +278,7 @@
 			!selectedModels?.some((modelId) => modelId) &&
 			!modelSearchParam
 		) {
-			const fallbackModels = normalizeSelectedModels(selectedModels);
+			const fallbackModels = normalizeSelectedModels(selectedModels, !!project);
 			if (!equal(fallbackModels, selectedModels)) {
 				selectedModels = fallbackModels;
 				if (!loading && !modelDefaults) setDefaults();
@@ -422,7 +424,7 @@
 	$: if (attachmentFolderSignature !== attachmentFolderKey) {
 		void loadFolderAttachments(activeFolder, attachmentFolderSignature);
 	}
-	$: attachmentMode = folderAttachments?.mode ?? (activeFolder ? 'assistant' : 'chat');
+	$: attachmentMode = folderAttachments?.mode ?? (project ? 'project' : activeFolder ? 'assistant' : 'chat');
 	$: attachmentModels = selectedModelIds.map((id) => $models.find((model) => model.id === id)).filter(Boolean);
 	$: attachmentCaps = runtimeAttachmentCapabilities(attachmentModels, $config, $user, attachmentMode,
 		{ web_search: webSearchActive, image_generation: imageGenerationEnabled, code_interpreter: codeInterpreterEnabled },
@@ -522,6 +524,17 @@
 		: readProject(activeFolder);
 	$: modeTerminalId = project?.terminal_id ?? null;
 	$: chatMode.set({ project, ready: !loading && !folderModeError && !attachmentsLoading && attachmentsInitialized });
+	$: if (!loading && !folderModeError && !attachmentsLoading && project && $models.length > 0) {
+		const incompatibleIds = new Set(
+			$models.filter((model) => !isProjectModelCompatible(model)).map((model) => model.id)
+		);
+		if (selectedModels.some((id) => incompatibleIds.has(id))) {
+			selectedModels = normalizeSelectedModels(selectedModels, true);
+		}
+		if (atSelectedModel && incompatibleIds.has(atSelectedModel.id)) {
+			atSelectedModel = undefined;
+		}
+	}
 	$: if ($selectedTerminalId !== modeTerminalId) selectedTerminalId.set(modeTerminalId);
 	$: if (project) {
 		if (codeInterpreterEnabled) codeInterpreterEnabled = false;
@@ -2829,7 +2842,7 @@
 
 		const availableModels = $models
 			.filter((m) => !(m?.info?.meta?.hidden ?? false))
-			.filter((model) => !readProject($selectedFolder) || model.info?.meta?.capabilities?.terminal !== false)
+			.filter((model) => !readProject($selectedFolder) || isProjectModelCompatible(model))
 			.map((m) => m.id);
 
 		const defaultModels = normalizeSelectedModels();
@@ -2873,7 +2886,8 @@
 
 			// Unavailable models filtering
 			selectedModels = selectedModels.filter((modelId) =>
-				$models.map((m) => m.id).includes(modelId)
+				$models.some((model) => model.id === modelId &&
+					(!readProject($selectedFolder) || isProjectModelCompatible(model)))
 			);
 		} else {
 			if ($selectedFolder) {

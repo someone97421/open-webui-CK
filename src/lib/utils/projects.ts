@@ -1,3 +1,5 @@
+import type { Model } from '$lib/stores';
+
 export type ProjectData = {
 	version: 1;
 	terminal_id: string;
@@ -40,6 +42,10 @@ export const isArchivedProject = (folder: ProjectFolder | null | undefined) =>
 
 export const getProjectTerminalId = (folder: ProjectFolder | null | undefined) =>
 	getFolderProject(folder)?.terminal_id ?? null;
+
+export const isProjectModelCompatible = (model: Model | null | undefined) =>
+	model != null &&
+	(model.info?.meta?.capabilities as { terminal?: boolean } | undefined)?.terminal !== false;
 
 export const getAccessibleProjectTerminals = <T extends { id?: string; contexts?: Record<string, unknown> }>(
 	servers: T[] | null | undefined

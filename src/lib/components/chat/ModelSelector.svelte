@@ -6,6 +6,7 @@
 
 	import { updateUserSettings } from '$lib/apis/users';
 	import { resolveLocalizedModelName } from '$lib/utils/localizedContent';
+	import { isProjectModelCompatible } from '$lib/utils/projects';
 	import equal from 'fast-deep-equal';
 	const i18n = getContext('i18n');
 
@@ -13,6 +14,7 @@
 	export let onModelSelect: (models: string[]) => void = () => {};
 	export let disabled = false;
 	export let multipleEnabled = true;
+	export let projectMode = false;
 
 	export let showSetDefault = true;
 	export let triggerClassName = 'text-lg';
@@ -22,6 +24,7 @@
 
 	let compareModels = selectedModels.length > 1;
 	let selector;
+	$: availableModels = projectMode ? $models.filter(isProjectModelCompatible) : $models;
 
 	export const open = () => selector?.open();
 
@@ -70,7 +73,7 @@
 					bind:this={selector}
 					id="model"
 					placeholder={$i18n.t('Select a model')}
-					items={$models.map((model) => ({
+					items={availableModels.map((model) => ({
 						value: model.id,
 						label: resolveLocalizedModelName(model, $i18n.language),
 						model: model

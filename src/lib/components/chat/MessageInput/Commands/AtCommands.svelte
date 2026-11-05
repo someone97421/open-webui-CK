@@ -1,6 +1,7 @@
 <script lang="ts">
 	import Fuse from 'fuse.js';
 	import { getContext, onDestroy, onMount, tick } from 'svelte';
+	import { readable, type Readable } from 'svelte/store';
 
 	import {
 		chatId as activeChatId,
@@ -21,6 +22,8 @@
 		resolveLocalizedModelName
 	} from '$lib/utils/localizedContent';
 	import { isTemporaryChatId } from '$lib/utils/chatId';
+	import { isProjectModelCompatible } from '$lib/utils/projects';
+	import { defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
 
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Database from '$lib/components/icons/Database.svelte';
@@ -32,6 +35,7 @@
 
 	const i18n = getContext<any>('i18n');
 	const ensureTerminalChat = getContext<((history?: any) => Promise<string | null>) | undefined>('ensureTerminalChat');
+	const attachmentPolicy = getContext<Readable<AttachmentPolicy>>('attachmentPolicy') ?? readable(defaultAttachmentPolicy);
 	let disposed = false;
 	let filesystemSearch = 0;
 
@@ -51,7 +55,8 @@
 	let knowledgeResults: any[] = [];
 
 	$: modelItems = (($models ?? []) as any[])
-		.filter((model) => !model?.info?.meta?.hidden)
+		.filter((model) => !model?.info?.meta?.hidden &&
+			($attachmentPolicy.mode !== 'project' || isProjectModelCompatible(model)))
 		.map((model) => ({
 			...model,
 			modelName: resolveLocalizedModelName(model, $i18n.language),
