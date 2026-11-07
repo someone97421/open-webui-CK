@@ -1447,10 +1447,10 @@ export const resolveChatMessageToolCall = async (
 	return res;
 };
 
-export const deleteChatById = async (token: string, id: string) => {
+export const deleteChatById = async (token: string, id: string, emptyOnly = false) => {
 	let error = null;
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/chats/${id}`, {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/chats/${id}${emptyOnly ? '?empty_only=true' : ''}`, {
 		method: 'DELETE',
 		headers: {
 			Accept: 'application/json',

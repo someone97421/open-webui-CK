@@ -81,7 +81,7 @@
 	import { RealtimeCall, getBridgeTurnState, type BridgeSubmission } from '$lib/utils/realtime';
 	import { acquireWakeLock } from '$lib/utils/wakeLock';
 	import { routeAvatarAnimation } from '$lib/utils/voice-avatar';
-	import { createTemporaryChatId, isTemporaryChatId } from '$lib/utils/chatId';
+	import { createTemporaryChatId, isSavedChatId, isTemporaryChatId } from '$lib/utils/chatId';
 	import { registerTemporaryChat } from '$lib/apis/terminal';
 	import { resumeTemporaryChat } from '$lib/apis';
 	import { getFolderById, getFolderAttachments, type FolderAttachments } from '$lib/apis/folders';
@@ -1119,15 +1119,18 @@
 		cancelBrowserInteractions();
 		bridge?.end();
 		noteChatDebug('navigateHandler start');
-		// Mark the outgoing chat as read before loading the new one.
-		// $chatId still holds the previous chat here — loadChat() updates it.
-		if ($chatId && $chatId !== chatIdProp && !$temporaryChatEnabled) {
-			noteChatDebug('marking outgoing chat read', { outgoingChatId: $chatId });
-			updateLastReadAt($chatId);
-		}
-
 		clearTimeout(saveControlsTimer);
-		await saveControls(null, true);
+		if ($chatId && $chatId !== chatIdProp && !$temporaryChatEnabled) {
+			if (isDisposableEmptyChat($chatId)) {
+				void cleanupOutgoingEmptyChat($chatId, chat?.folder_id ?? chatFolder?.id);
+			} else {
+				noteChatDebug('marking outgoing chat read', { outgoingChatId: $chatId });
+				updateLastReadAt($chatId);
+				await saveControls(null, true);
+			}
+		} else {
+			await saveControls(null, true);
+		}
 		if (signal.aborted) return;
 		attachment_overrides = attachmentOverrides();
 		attachmentsInitialized = false;
@@ -2149,9 +2152,14 @@
 			try {
 				cancelBrowserInteractions();
 				clearTimeout(saveControlsTimer);
-				saveControls();
-				if (chatIdProp && !$temporaryChatEnabled) {
-					updateLastReadAt(chatIdProp);
+				const outgoingChatId = $chatId || chatIdProp;
+				if (outgoingChatId && !$temporaryChatEnabled && isDisposableEmptyChat(outgoingChatId)) {
+					void cleanupOutgoingEmptyChat(outgoingChatId, chat?.folder_id ?? chatFolder?.id);
+				} else {
+					saveControls();
+					if (chatIdProp && !$temporaryChatEnabled) {
+						updateLastReadAt(chatIdProp);
+					}
 				}
 				showArtifactsSubscribe();
 				selectedFolderSubscribe();
@@ -2788,18 +2796,20 @@
 
 	const initNewChat = async () => {
 		loading = true;
-		if (
-			!embedded &&
-			($showTabs === 'comments' || $showTabs === 'side' || typeof $showTabs === 'object')
-		)
-			showTabs.set(false);
+		if (!embedded && $showTabs) showTabs.set(false);
 		const signal = startChatLoad();
+		const outgoingFolderId = chat?.folder_id ?? chatFolder?.id;
+		const outgoingIsEmpty = isDisposableEmptyChat($chatId);
 		chatFolder = null;
 		chatFolderChatId = '';
 		folderModeError = false;
 		modelDefaults = null;
 		clearTimeout(saveControlsTimer);
-		await saveControls(null, true);
+		if (outgoingIsEmpty) {
+			void cleanupOutgoingEmptyChat($chatId, outgoingFolderId);
+		} else {
+			await saveControls(null, true);
+		}
 		if (signal.aborted) return;
 		defaultsFolderId = $selectedFolder?.id ?? null;
 		draftDefaultsKey = folderDefaultsKey($selectedFolder);
@@ -2815,7 +2825,7 @@
 
 		// Mark the outgoing chat as read before resetting; in-place created chats
 		// keep chatIdProp undefined, so navigateHandler never marks them read.
-		if ($chatId && !$temporaryChatEnabled) {
+		if ($chatId && !$temporaryChatEnabled && !outgoingIsEmpty) {
 			updateLastReadAt($chatId);
 		}
 
@@ -4132,6 +4142,26 @@
 	};
 	setContext('ensureTerminalChat', (_history = history) => getChatId(_history, !!project, true));
 	setContext('ensureChat', (_history = history) => getChatId(_history, false, true));
+	let workspacePreparation = 0;
+	setContext('ensureWorkspaceChat', async () => {
+		const _history = history;
+		const signal = chatLoadController.signal;
+		workspacePreparation += 1;
+		try {
+			const id = await getChatId(_history, false, true);
+			if (!id || history !== _history || signal.aborted) return null;
+			if (!isSavedChatId(id) || chat?.user_id !== $user?.id) return id;
+			if (!chat?.chat?.workspace_has_files) {
+				const saved = await updateChatById(localStorage.token, id, { workspace_has_files: true });
+				if (!saved) throw new Error($i18n.t('Failed to save chat'));
+				if (history !== _history || signal.aborted || $chatId !== id) return null;
+				chat = { ...chat, chat: { ...chat.chat, workspace_has_files: true } };
+			}
+			return id;
+		} finally {
+			workspacePreparation -= 1;
+		}
+	});
 
 	const submitHandler = async (
 		userPrompt: string,
@@ -5160,6 +5190,7 @@
 			chatFolderChatId = createdChat.id;
 			_chatId = chat.id;
 			chatId.set(_chatId);
+			createdEmptyChatIds.add(_chatId);
 
 			if (!embedded) {
 				saveDraft(getChatInputDraft(), _chatId, false);
@@ -5329,6 +5360,66 @@
 			clearTimeout(saveDraftTimeout);
 		}
 		await sessionStorage.removeItem(chatId ? `chat-input-${chatId}` : getNewChatDraftKey());
+	};
+
+	const createdEmptyChatIds = new Set<string>();
+	const cleanedEmptyChatIds = new Set<string>();
+	const isDisposableEmptyChat = (targetId: string | null | undefined): boolean => {
+		if (!targetId || !createdEmptyChatIds.has(targetId) || cleanedEmptyChatIds.has(targetId)) return false;
+		if (embedded || isShared || $temporaryChatEnabled || !isSavedChatId(targetId)) return false;
+		if (chat?.id !== targetId) return false;
+		if (chat?.pinned || chat?.archived || chat?.share_id || chat?.meta?.internal) return false;
+		if (chat?.timer_at != null || chat?.chat?.workspace_has_files || workspacePreparation > 0) return false;
+		if ((chat?.meta?.tags ?? []).length > 0) return false;
+		const title = String(chat?.title ?? '').trim();
+		if (title && !['New Chat', '新对话', 'Chat', $i18n.t('New Chat')].includes(title)) {
+			return false;
+		}
+		if (Object.keys(history?.messages ?? {}).length > 0) return false;
+		if ((chat?.chat?.messages ?? []).length > 0) return false;
+		if (generating || processing || chatCreation || chatIdRequest) return false;
+		if (($chatRequestQueues[targetId] ?? []).length > 0) return false;
+		if (
+			prompt?.trim() ||
+			files.length > 0 ||
+			chatFiles.length > 0 ||
+			(chat?.chat?.files ?? []).length > 0
+		) {
+			return false;
+		}
+		try {
+			const rawDraft = sessionStorage.getItem(`chat-input-${targetId}`);
+			if (rawDraft) {
+				const parsed = JSON.parse(rawDraft);
+				if (parsed?.prompt?.trim() || (parsed?.files ?? []).length > 0) return false;
+			}
+		} catch {
+			return false;
+		}
+		return true;
+	};
+
+	const cleanupOutgoingEmptyChat = async (targetId: string, folderId?: string | null) => {
+		if (!targetId || cleanedEmptyChatIds.has(targetId)) return;
+		cleanedEmptyChatIds.add(targetId);
+		if (saveDraftTimeout) {
+			clearTimeout(saveDraftTimeout);
+		}
+		try {
+			const token = localStorage.token;
+			if (!token) return;
+			const deleted = await deleteChatById(token, targetId, true).catch(() => false);
+			if (deleted) {
+				createdEmptyChatIds.delete(targetId);
+				sessionStorage.removeItem(`chat-input-${targetId}`);
+				await refreshChatList(token);
+				if (folderId) {
+					await refreshFolderChatLists(folderId);
+				}
+			}
+		} catch {} finally {
+			cleanedEmptyChatIds.delete(targetId);
+		}
 	};
 
 	const moveChatHandler = async (chatId, folderId) => {

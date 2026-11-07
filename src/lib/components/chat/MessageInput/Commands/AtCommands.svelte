@@ -120,7 +120,7 @@
 	const getFilesystemItems = async (terminal = getSelectedTerminal()) => {
 		const version = ++filesystemSearch;
 		const searchQuery = query;
-		if (!terminal) {
+		if (!terminal || (!$activeChatId && !searchQuery.trim())) {
 			filesystemItems = [];
 			return;
 		}

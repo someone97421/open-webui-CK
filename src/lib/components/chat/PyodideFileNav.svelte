@@ -17,6 +17,7 @@
 	import Document from '../icons/Document.svelte';
 
 	const i18n = getContext('i18n');
+	const ensureWorkspaceChat = getContext<(() => Promise<string | null>) | undefined>('ensureWorkspaceChat');
 	export let overlay = false;
 
 	type Context = { scope: PyodideScope; generation: number; path: string };
@@ -67,6 +68,20 @@
 	};
 	const isCurrentView = (context: Context, generation: number) =>
 		isCurrent(context) && generation === viewGeneration;
+	const ensureWritableContext = async (initialContext: Context | null): Promise<Context | null> => {
+		if (!initialContext || !isCurrent(initialContext)) return null;
+		if (!ensureWorkspaceChat) return initialContext;
+		const targetPath = initialContext.path;
+		const id = await ensureWorkspaceChat().catch(() => null);
+		await tick();
+		if (disposed || !id) return null;
+		onScopeChanged();
+		const nextContext = captureContext();
+		if (!nextContext || nextContext.scope.chatId !== id ||
+			nextContext.scope.userId !== initialContext.scope.userId ||
+			nextContext.scope.generation !== initialContext.scope.generation) return null;
+		return { ...nextContext, path: targetPath };
+	};
 
 	function sendWorkerMessage(msg: any, context: Context): Promise<any> {
 		if (!isCurrent(context)) return Promise.reject(new Error('Python context changed'));
@@ -256,12 +271,14 @@
 		if (isCurrentView(context, generation) && creatingFolder) newFolderInput?.focus();
 	};
 	const submitNewFolder = async () => {
-		const context = captureContext();
-		const generation = viewGeneration;
+		const initialContext = captureContext();
 		const name = newFolderName.trim();
 		creatingFolder = false;
 		newFolderName = '';
-		if (!context || !name) return;
+		if (!initialContext || !name) return;
+		const context = await ensureWritableContext(initialContext);
+		const generation = viewGeneration;
+		if (!context) return;
 		const path = `${context.path}${name}`.replace(/\/$/, '');
 		try {
 			await sendWorkerMessage({ type: 'fs:mkdir', path }, context);
@@ -281,12 +298,14 @@
 		if (isCurrentView(context, generation) && creatingFile) newFileInput?.focus();
 	};
 	const submitNewFile = async () => {
-		const context = captureContext();
-		const generation = viewGeneration;
+		const initialContext = captureContext();
 		const name = newFileName.trim();
 		creatingFile = false;
 		newFileName = '';
-		if (!context || !name) return;
+		if (!initialContext || !name) return;
+		const context = await ensureWritableContext(initialContext);
+		const generation = viewGeneration;
+		if (!context) return;
 		try {
 			await sendWorkerMessage({
 				type: 'fs:upload', files: [{ name, data: new ArrayBuffer(0) }],
@@ -299,7 +318,9 @@
 	};
 
 	const uploadFiles = async (fileList: File[]) => {
-		const context = captureContext();
+		const initialContext = captureContext();
+		if (!initialContext) return;
+		const context = await ensureWritableContext(initialContext);
 		const generation = viewGeneration;
 		if (!context) return;
 		try {

@@ -268,17 +268,6 @@
 	};
 	const openFiles = async (selector = $selectedTerminalId, directory?: string) => {
 		if (!$chatMode.ready || (selector ? !terminalAccessible(selector) : !showFilesTab)) return;
-		const panelHistory = history;
-		if (!selector) {
-			try {
-				const id = ensureTerminalChat ? await ensureTerminalChat(panelHistory) : chatId;
-				await tick();
-				if (disposed || history !== panelHistory || selector !== $selectedTerminalId || !id || id !== chatId) return;
-			} catch (error) {
-				if (!disposed && history === panelHistory) toast.error(`${error}`);
-				return;
-			}
-		}
 		const id = selector ? `files:${selector}` : 'files';
 		await openPanel({
 			id,
@@ -686,8 +675,8 @@
 			...(browserEnabled ? [openBrowser] : []),
 			...(desktopEnabled ? [openDesktop] : [])
 		];
-		if (terminalFilesAvailable || (!hasOpenedTabs && showFilesTab)) openFiles();
-		else if (options.length === 1) options[0]();
+		if ((terminalFilesAvailable && !!chatId) || (!hasOpenedTabs && showFilesTab && (!terminalFilesAvailable || !!chatId))) openFiles();
+		else if (options.length === 1 && (!terminalFilesAvailable || !!chatId)) options[0]();
 		hasOpenedTabs = true;
 	}
 	$: if (
@@ -781,7 +770,7 @@
 		mediaQuery.addEventListener('change', handleMediaQuery);
 		handleMediaQuery(mediaQuery);
 		expanded = localStorage.getItem('chatTabsLayout') === 'full';
-		if (expanded && largeScreen && !$showTabs) showTabs.set(true);
+		if (expanded && largeScreen && chatId && !$showTabs) showTabs.set(true);
 
 		let isDestroyed = false;
 

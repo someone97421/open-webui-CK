@@ -72,6 +72,27 @@ def chat_message_list(chat: dict) -> list:
     return messages if isinstance(messages, list) else []
 
 
+DEFAULT_EMPTY_CHAT_TITLES = frozenset({'', 'New Chat', '新对话', 'Chat'})
+
+
+def is_empty_disposable_chat_data(
+    chat: dict | None, meta: dict | None = None, title: str | None = None
+) -> bool:
+    if is_internal_chat(meta):
+        return False
+    if isinstance(meta, dict) and meta.get('tags'):
+        return False
+    if (title or '').strip() not in DEFAULT_EMPTY_CHAT_TITLES:
+        return False
+    if not isinstance(chat, dict):
+        return False
+    if chat_message_list(chat):
+        return False
+    if chat.get('files') or chat.get('workspace_has_files'):
+        return False
+    return True
+
+
 def chat_search_snippet(chat: dict, search_text: str, max_length: int = 200) -> str | None:
     search_text = chat_search_content_query(search_text)
     if not search_text:
@@ -2847,6 +2868,50 @@ class ChatTable:
 
                 return True and await self.delete_shared_chat_by_chat_id(id, db=session)
         except Exception:
+            return False
+
+    async def delete_empty_chat_by_id_and_user_id(self, id: str, user_id: str) -> bool:
+        try:
+            async with self._chat_transaction(id) as (session, chat):
+                if (
+                    chat is None
+                    or chat.user_id != user_id
+                    or chat.current_message_id is not None
+                    or chat.pinned
+                    or chat.archived
+                    or chat.share_id
+                    or chat.timer_at is not None
+                    or not is_empty_disposable_chat_data(chat.chat, chat.meta, chat.title)
+                ):
+                    return False
+
+                has_related_content = await session.scalar(
+                    select(
+                        or_(
+                            exists().where(ChatMessage.chat_id == id),
+                            exists().where(ChatFile.chat_id == id),
+                            exists().where(AutomationRun.chat_id == id),
+                            exists().where(
+                                Chat.user_id == user_id,
+                                Chat.meta['parent_chat_id'].as_string() == id,
+                            ),
+                        )
+                    )
+                )
+                if has_related_content:
+                    return False
+
+                recipients = await delete_resource_comments(
+                    'chat',
+                    select(Chat.id).where(Chat.id == id, Chat.user_id == user_id),
+                    db=session,
+                )
+                await session.delete(chat)
+
+            await emit_changes(recipients)
+            return True
+        except Exception:
+            log.exception('Failed to delete empty chat %s for user %s', id, user_id)
             return False
 
     async def delete_chats_by_user_id(self, user_id: str, db: AsyncSession | None = None) -> bool:

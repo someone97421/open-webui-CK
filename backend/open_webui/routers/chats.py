@@ -1711,9 +1711,27 @@ async def send_chat_message_event_by_id(
 async def delete_chat_by_id(
     request: Request,
     id: str,
+    empty_only: bool = False,
     user=Depends(get_verified_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    if empty_only:
+        chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
+        if not chat:
+            return False
+        await require_project_chat_owner(chat, user, db)
+        result = await Chats.delete_empty_chat_by_id_and_user_id(id, user.id)
+        if result:
+            await stop_item_tasks(request.app.state.redis, id)
+            await publish_event(
+                request,
+                EVENTS.CHAT_DELETED,
+                actor=user,
+                subject_id=id,
+                data={'owner_id': chat.user_id},
+            )
+        return result
+
     # Authorize before any side effect: cancelling a chat's in-flight tasks must
     # not be reachable for a chat the caller may not delete.
     if user.role == 'admin':
