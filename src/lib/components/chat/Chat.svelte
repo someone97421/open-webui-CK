@@ -82,7 +82,7 @@
 	import { acquireWakeLock } from '$lib/utils/wakeLock';
 	import { routeAvatarAnimation } from '$lib/utils/voice-avatar';
 	import { createTemporaryChatId, isSavedChatId, isTemporaryChatId } from '$lib/utils/chatId';
-	import { registerTemporaryChat } from '$lib/apis/terminal';
+	import { registerTemporaryChat, resolveTerminalConnection } from '$lib/apis/terminal';
 	import { resumeTemporaryChat } from '$lib/apis';
 	import { getFolderById, getFolderAttachments, type FolderAttachments } from '$lib/apis/folders';
 	import {
@@ -1741,6 +1741,7 @@
 							updateLastReadAt($chatId);
 						}
 					}
+					return;
 				} else if (type === 'response:completion' || type === 'chat:completion') {
 					if (type === 'response:completion') {
 						responseCompletionEventHandler(data, message);
@@ -3898,9 +3899,26 @@
 
 		saveSessionSelectedModels();
 
-		return await sendMessage(history, userMessageId, {
-			modelId: bridgeRequest?.modelId ?? null
-		});
+		const submissionHistory = history;
+		try {
+			return await sendMessage(history, userMessageId, {
+				modelId: bridgeRequest?.modelId ?? null
+			});
+		} catch (error) {
+			if (history === submissionHistory) {
+				const errorMessage = getErrorMessage(error);
+				toast.error(errorMessage);
+				for (const id of history.messages[userMessageId]?.childrenIds ?? []) {
+					const message = history.messages[id];
+					if (message?.role === 'assistant' && !message.done) {
+						message.done = true;
+						message.error = { content: errorMessage };
+					}
+				}
+				history = history;
+			}
+			return { status: 'rejected' as const };
+		}
 	};
 
 	const handleManualCompact = async () => {
@@ -4123,6 +4141,7 @@
 					await onSelectEmbeddedChat?.(id);
 				} else if ($temporaryChatEnabled || needsTerminal || ensurePersistent) {
 					id = await initChatHandler(_history, needsTerminal);
+					if (!id) return null;
 				}
 			}
 			if (history !== _history || signal.aborted) return null;
@@ -4400,7 +4419,9 @@
 				)
 			)
 				throw new Error('Attached files must belong to this chat and the same terminal.');
-			if (terminal && !isTerminalAvailable(terminal))
+			if (terminal && !resolveTerminalConnection(
+				terminal, $terminalServers ?? [], $settings?.terminalServers ?? [], localStorage.token
+			))
 				throw new Error('The attached file’s terminal is unavailable.');
 		}
 		if (autoScroll) {

@@ -228,6 +228,13 @@ export const resolveTerminalConnection = (
 		: null;
 };
 
+export class TerminalRequestError extends Error {
+	constructor(message: string, public status: number) {
+		super(message);
+		this.name = 'TerminalRequestError';
+	}
+}
+
 export const terminalRequest = async <T>(
 	connection: TerminalConnection,
 	chatId: string | null,
@@ -245,12 +252,13 @@ export const terminalRequest = async <T>(
 	});
 	if (!response.ok) {
 		const body = await response.json().catch(() => null);
-		throw new Error(
+		throw new TerminalRequestError(
 			typeof body?.detail === 'string'
 				? body.detail
 				: typeof body?.error === 'string'
 					? body.error
-					: `Terminal request failed (${response.status})`
+					: `Terminal request failed (${response.status})`,
+			response.status
 		);
 	}
 	return response.json();
@@ -314,12 +322,13 @@ export const getTerminalConfig = async (
 export const getCwd = async (
 	baseUrl: string,
 	apiKey: string,
-	sessionId?: string
+	sessionId?: string,
+	signal?: AbortSignal
 ): Promise<TerminalCwd | null> => {
 	const url = `${baseUrl.replace(/\/$/, '')}/files/cwd`;
 	const headers: Record<string, string> = bearerHeaders(apiKey);
 	if (sessionId) headers['X-Session-Id'] = sessionId;
-	const res = await fetch(url, { headers }).catch(() => null);
+	const res = await fetch(url, { headers, signal }).catch(() => null);
 	if (!res || !res.ok) return null;
 	const json = await res.json().catch(() => null);
 	if (!json) return null;
@@ -334,13 +343,14 @@ export const listFiles = async (
 	baseUrl: string,
 	apiKey: string,
 	path: string = '/',
-	sessionId?: string
+	sessionId?: string,
+	signal?: AbortSignal
 ): Promise<TerminalFileList | null> => {
 	// The endpoint uses `directory` as the query param name
 	const url = `${baseUrl.replace(/\/$/, '')}/files/list?directory=${encodeURIComponent(path)}`;
 	const headers: Record<string, string> = bearerHeaders(apiKey);
 	if (sessionId) headers['X-Session-Id'] = sessionId;
-	const res = await fetch(url, { headers })
+	const res = await fetch(url, { headers, signal })
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
 			return res.json();
@@ -591,7 +601,8 @@ export const uploadToTerminal = async (
 	apiKey: string,
 	directory: string,
 	file: File,
-	sessionId?: string
+	sessionId?: string,
+	signal?: AbortSignal
 ): Promise<{ path: string; size: number } | null> => {
 	const url = `${baseUrl.replace(/\/$/, '')}/files/upload?directory=${encodeURIComponent(directory)}`;
 	const body = new FormData();
@@ -601,7 +612,8 @@ export const uploadToTerminal = async (
 	const res = await fetch(url, {
 		method: 'POST',
 		headers,
-		body
+		body,
+		signal
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
@@ -622,26 +634,39 @@ export const uploadNewFileToTerminal = async (
 	apiKey: string,
 	directory: string,
 	file: File,
-	sessionId?: string
+	sessionId?: string,
+	signal?: AbortSignal
 ): Promise<{ path: string; size: number } | null> => {
 	const upload = newFileUploadQueue.then(async () => {
-		const listing = await listFiles(baseUrl, apiKey, directory, sessionId);
-		if (!listing) return null;
+		signal?.throwIfAborted();
+		const controller = new AbortController();
+		const cancel = () => controller.abort();
+		signal?.addEventListener('abort', cancel, { once: true });
+		let timedOut = false;
+		const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 120000);
+		try {
+			const listing = await listFiles(baseUrl, apiKey, directory, sessionId, controller.signal);
+			controller.signal.throwIfAborted();
+			if (!listing) return null;
 
-		const names = new Set(listing.entries.map((entry) => entry.name));
-		const extensionIndex = file.name.startsWith('.') ? -1 : file.name.lastIndexOf('.');
-		const stem = extensionIndex > 0 ? file.name.slice(0, extensionIndex) : file.name;
-		const extension = extensionIndex > 0 ? file.name.slice(extensionIndex) : '';
-		let name = file.name;
-		for (let suffix = 1; names.has(name); suffix++) {
-			name = `${stem} (${suffix})${extension}`;
+			const names = new Set(listing.entries.map((entry) => entry.name));
+			const extensionIndex = file.name.startsWith('.') ? -1 : file.name.lastIndexOf('.');
+			const stem = extensionIndex > 0 ? file.name.slice(0, extensionIndex) : file.name;
+			const extension = extensionIndex > 0 ? file.name.slice(extensionIndex) : '';
+			let name = file.name;
+			for (let suffix = 1; names.has(name); suffix++) name = `${stem} (${suffix})${extension}`;
+			const uploadFile = name === file.name
+				? file : new File([file], name, { type: file.type, lastModified: file.lastModified });
+			const result = await uploadToTerminal(baseUrl, apiKey, directory, uploadFile, sessionId, controller.signal);
+			controller.signal.throwIfAborted();
+			return result;
+		} catch (cause) {
+			if (timedOut) throw new TerminalRequestError('文件上传超时（120 秒），请重试。', 408);
+			throw cause;
+		} finally {
+			clearTimeout(timeout);
+			signal?.removeEventListener('abort', cancel);
 		}
-
-		const uploadFile =
-			name === file.name
-				? file
-				: new File([file], name, { type: file.type, lastModified: file.lastModified });
-		return uploadToTerminal(baseUrl, apiKey, directory, uploadFile, sessionId);
 	});
 	newFileUploadQueue = upload.then(
 		() => undefined,

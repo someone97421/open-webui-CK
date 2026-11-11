@@ -142,7 +142,12 @@
 	const ensureChat = getContext<((history: any) => Promise<string | null>) | undefined>('ensureChat');
 	const chatMode = getContext<Readable<any> | undefined>('chatMode') ?? readable(null);
 	let uploadDisposed = false;
-	onDestroy(() => { uploadDisposed = true; });
+	const terminalUploadControllers = new Set<AbortController>();
+	onDestroy(() => {
+		uploadDisposed = true;
+		for (const controller of terminalUploadControllers) controller.abort();
+		terminalUploadControllers.clear();
+	});
 
 	type AskUserPrompt = {
 		id?: string;
@@ -1064,6 +1069,9 @@
 		const selector = $selectedTerminalId;
 		const current = () => !uploadDisposed && history === uploadHistory && $_user?.id === uploadUserId &&
 			$selectedTerminalId === selector && files.includes(fileItem) && chatId === sessionId;
+		const controller = new AbortController();
+		terminalUploadControllers.add(controller);
+		const timeout = setTimeout(() => controller.abort(), 20000);
 		fileItem.status = 'uploading';
 		fileItem.error = '';
 		files = files;
@@ -1079,7 +1087,8 @@
 			const cwd =
 				(terminalContext?.terminalId === fileItem.terminal_id
 					? terminalContext?.currentDirectory
-					: null) || (await getCwd(terminal.url, terminal.key, sessionId || undefined))?.cwd;
+					: null) || (await getCwd(terminal.url, terminal.key, sessionId || undefined, controller.signal))?.cwd;
+			clearTimeout(timeout);
 			if (!cwd) throw new Error($i18n.t('Could not determine the upload folder.'));
 			if (!current()) return false;
 			const uploadedFile = await uploadNewFileToTerminal(
@@ -1087,7 +1096,8 @@
 				terminal.key,
 				cwd,
 				fileItem.file,
-				sessionId || undefined
+				sessionId || undefined,
+				controller.signal
 			);
 			if (!uploadedFile) throw new Error($i18n.t('Failed to upload file.'));
 			if (!current()) return false;
@@ -1104,10 +1114,19 @@
 		} catch (error) {
 			if (!current()) return false;
 			fileItem.status = 'error';
-			fileItem.error = `${error}`;
+			fileItem.error = controller.signal.aborted
+				? '工作空间连接超时（20 秒），请重试。'
+				: `${error}`;
 			toast.error(fileItem.error);
 			return false;
 		} finally {
+			clearTimeout(timeout);
+			if (!current() && !uploadDisposed && files.includes(fileItem) && fileItem.status === 'uploading') {
+				fileItem.status = 'error';
+				fileItem.error = '会话上下文已变化，请重新上传文件。';
+				files = files;
+			}
+			terminalUploadControllers.delete(controller);
 			if (current()) files = files;
 		}
 		return true;

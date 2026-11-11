@@ -20,7 +20,7 @@
 	import {
 		terminalRequest,
 		type TerminalFileList,
-		getCwd,
+		TerminalRequestError,
 		getFileMatches,
 		listFiles,
 		readFile,
@@ -340,6 +340,64 @@
 	let currentWritable = true;
 	let loading = false;
 	let error: string | null = null;
+	let directoryReady = false;
+	let loadingStage = '正在准备会话';
+	let directoryController: AbortController | null = null;
+	let workspaceRetryTimer: ReturnType<typeof setTimeout> | null = null;
+	let workspaceRetryAttempt = 0;
+	let workspaceRetryDelay = 0;
+	const workspaceRetryDelays = [1000, 2500, 5000];
+	const clearWorkspaceRetry = (reset = true) => {
+		if (workspaceRetryTimer) clearTimeout(workspaceRetryTimer);
+		workspaceRetryTimer = null;
+		workspaceRetryDelay = 0;
+		if (reset) workspaceRetryAttempt = 0;
+	};
+	const scheduleWorkspaceRetry = (cause: unknown) => {
+		const retryable = !(cause instanceof TerminalRequestError) ||
+			cause.status === 408 || cause.status === 429 || cause.status >= 500;
+		if (disposed || !retryable || workspaceRetryAttempt >= workspaceRetryDelays.length) return;
+		clearWorkspaceRetry(false);
+		const delay = workspaceRetryDelays[workspaceRetryAttempt++];
+		workspaceRetryDelay = Math.ceil(delay / 1000);
+		workspaceRetryTimer = setTimeout(() => {
+			workspaceRetryTimer = null;
+			workspaceRetryDelay = 0;
+			if (active && document.visibilityState === 'visible') void retryWorkspace(false);
+		}, delay);
+	};
+	const directoryRequest = async <T,>(
+		terminal: { url: string; key: string }, session: string | null, path: string
+	): Promise<T> => {
+		directoryController?.abort();
+		const controller = new AbortController();
+		directoryController = controller;
+		const timeout = setTimeout(() => controller.abort(), 20000);
+		try {
+			return await terminalRequest<T>({
+				selector: effectiveTerminalId ?? '',
+				baseUrl: terminal.url.replace(/\/$/, ''), key: terminal.key,
+				system: ($terminalServers ?? []).some((server) => server.id === effectiveTerminalId)
+			}, session, path, { signal: controller.signal });
+		} catch (cause) {
+			if (controller.signal.aborted && directoryController === controller && !disposed)
+				throw new TerminalRequestError('工作空间响应超时（20 秒）', 408);
+			throw cause;
+		} finally {
+			clearTimeout(timeout);
+			if (directoryController === controller) directoryController = null;
+		}
+	};
+	const retryWorkspace = async (reset = true) => {
+		if (disposed || loading) return;
+		clearWorkspaceRetry(reset);
+		if (terminalChatContextPending && ensureTerminalChat) {
+			workspacePreparation = null;
+			await prepareWorkspace(chatId, effectiveTerminalId, $terminalServers, $settings);
+		} else if (selectedTerminal) {
+			await initializeDirectory(selectedTerminal, directoryReady ? currentPath : undefined);
+		}
+	};
 
 	// Browser view state
 	type SortMode = 'name' | 'size' | 'date' | 'created';
@@ -647,16 +705,34 @@
 		selector: string | null;
 		servers: any;
 		settingsValue: any;
+		cancel: () => void;
 	} | null = null;
 	const prepareWorkspace = async (id, selector, servers, settingsValue) => {
 		if (!ensureTerminalChat || disposed) return;
 		if (workspacePreparation?.id === id && workspacePreparation.selector === selector &&
 			workspacePreparation.servers === servers && workspacePreparation.settingsValue === settingsValue) return;
-		const preparation = { id, selector, servers, settingsValue };
+		workspacePreparation?.cancel();
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		let cancelWait: ((cause: unknown) => void) | null = null;
+		const preparation = { id, selector, servers, settingsValue, cancel: () => {
+			if (timeout) clearTimeout(timeout);
+			cancelWait?.(new DOMException('工作空间已切换', 'AbortError'));
+		} };
 		workspacePreparation = preparation;
+		clearWorkspaceRetry(false);
+		loading = true;
+		error = null;
+		loadingStage = '正在准备会话';
 		workspaceReadyId = null;
 		try {
-			const preparedId = await ensureTerminalChat();
+			const preparedId = await Promise.race([
+				ensureTerminalChat(),
+				new Promise<never>((_, reject) => {
+					cancelWait = reject;
+					timeout = setTimeout(() => reject(new TerminalRequestError('会话准备超时（20 秒）', 408)), 20000);
+				})
+			]);
+			if (!preparedId) throw new Error('未能准备工作空间会话');
 			await tick();
 			if (disposed || workspacePreparation !== preparation || !preparedId ||
 				effectiveTerminalId !== selector || (chatId && chatId !== preparedId)) return;
@@ -664,10 +740,18 @@
 			chatId = preparedId;
 			workspaceReadyTerminalId = selector;
 			workspaceReadyId = preparedId;
-		} catch (error) {
-			if (!disposed && workspacePreparation === preparation) toast.error(`${error}`);
+		} catch (cause) {
+			if (!disposed && workspacePreparation === preparation) {
+				error = errorMessage(cause);
+				loading = false;
+				scheduleWorkspaceRetry(cause);
+			}
+		} finally {
+			if (timeout) clearTimeout(timeout);
+			cancelWait = null;
 		}
 	};
+	const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 	$: previewBaseUrl =
 		selectedTerminal && chatId && ($terminalServers ?? []).some((server) => server.url === selectedTerminal.url)
 			? `${selectedTerminal.url}/chats/${encodeURIComponent(chatId)}`
@@ -713,12 +797,17 @@
 	let prevChatId = chatId;
 	let mounted = false;
 	let disposed = false;
+	let wasActive = active;
+	$: if (active !== wasActive) {
+		wasActive = active;
+		if (mounted && active && error && !loading) void retryWorkspace(false);
+	}
 	let connectionLoaded = false;
 	let displayFileRequest: (request: any) => Promise<void> = async () => {};
 	let displayDirectoryRequest: (path: string | null) => Promise<void> = async () => {};
-	$: if (mounted && selectedTerminal && manageFileRequests && active && $showFileNavPath)
+	$: if (mounted && selectedTerminal && directoryReady && !loading && manageFileRequests && active && $showFileNavPath)
 		void displayFileRequest($showFileNavPath);
-	$: if (mounted && selectedTerminal && $showFileNavDir)
+	$: if (mounted && selectedTerminal && directoryReady && !loading && $showFileNavDir)
 		void displayDirectoryRequest($showFileNavDir);
 	$: if (mounted && ensureTerminalChat)
 		void prepareWorkspace(chatId, effectiveTerminalId, $terminalServers, $settings);
@@ -742,6 +831,10 @@
 		}
 
 		if (chatChanged || terminalChanged || !terminal) {
+			clearWorkspaceRetry();
+			directoryController?.abort();
+			directoryController = null;
+			directoryReady = false;
 			comparison = null;
 			pinnedComparison = null;
 		}
@@ -971,7 +1064,7 @@
 	const applyCwd = (cwd: TerminalCwd | null) => {
 		const cwdPath = cwd?.cwd ? asDirectoryPath(cwd.cwd) : null;
 		setFileRoot(rootFromCwd(cwd));
-		const path = cwdPath ?? fileRoot?.path ?? '/';
+		const path = cwdPath ?? fileRoot?.path ?? cwd?.home ?? '/';
 		return clampToFileRoot(path);
 	};
 
@@ -1055,45 +1148,41 @@
 		openedFile = null;
 		saveConnection = null;
 		dirty = false;
+		clearWorkspaceRetry(false);
 		loading = true;
+		loadingStage = '正在读取目录';
 		error = null;
 		selectedFile = null;
 		selectedFileWritable = true;
 		clearFilePreview();
 		clearSelection();
-		if (!options.preserveTree || directory !== currentPath || !terminalContext) {
-			terminalContext = { terminalId: effectiveTerminalId, currentDirectory: directory };
-		}
 		currentPath = directory;
-		savedPath = directory;
 		pushNavHistory(directory);
 
 		let result: TerminalFileList | null = null;
-		let failure = '目录加载失败，请检查 Terminal 连接';
+		let failure: unknown = new Error('目录加载失败，请检查 Terminal 连接');
 		try {
-			result = await terminalRequest<TerminalFileList>(
-				{
-					selector: selector ?? '',
-					baseUrl: terminal.url.replace(/\/$/, ''),
-					key: terminal.key,
-					system: ($terminalServers ?? []).some((server) => server.id === selector)
-				},
-				session,
-				`/files/list?directory=${encodeURIComponent(directory)}`
+			result = await directoryRequest<TerminalFileList>(
+				terminal, session, `/files/list?directory=${encodeURIComponent(directory)}`
 			);
-			if (!Array.isArray(result?.entries)) throw new Error('Terminal 返回了无效的文件列表');
+			if (!Array.isArray(result?.entries))
+				throw new TerminalRequestError('Terminal 返回了无效的文件列表', 502);
 		} catch (cause) {
 			result = null;
-			if (cause instanceof Error) failure = cause.message;
+			failure = cause;
 		}
 		if (disposed || generation !== loadGeneration || selector !== effectiveTerminalId || session !== chatId)
 			return;
 		loading = false;
 
 		if (result === null) {
-			error = failure;
+			error = errorMessage(failure);
+			scheduleWorkspaceRetry(failure);
 			entries = [];
 		} else {
+			clearWorkspaceRetry();
+			savedPath = directory;
+			terminalContext = { terminalId: selector, currentDirectory: directory };
 			if (!initialFile && options.syncCwd !== false) void setCwd(terminal.url, terminal.key, directory, session ?? undefined);
 			currentWritable = result.writable !== false;
 			entries = normalizeEntries(result.entries);
@@ -1905,34 +1994,49 @@
 		}
 	};
 
-	const initializeDirectory = async (terminal: { url: string; key: string }) => {
-		const generation = loadGeneration;
+	const initializeDirectory = async (terminal: { url: string; key: string }, directory?: string) => {
+		const generation = ++loadGeneration;
 		const selector = effectiveTerminalId;
 		const session = chatId;
 		const current = () => !disposed && generation === loadGeneration &&
 			selector === effectiveTerminalId && session === chatId &&
 			selectedTerminal?.url === terminal.url && selectedTerminal?.key === terminal.key;
-		const serverCwd = await getCwd(terminal.url, terminal.key, session ?? undefined);
-		if (!current()) return;
-		const serverPath = applyCwd(serverCwd);
-		savedPath = clampToFileRoot(
-			terminalContext?.terminalId === selector ? terminalContext.currentDirectory : serverPath
-		);
-		if (initialFile) {
-			const file = initialFile;
-			const path = normalizePath(file.path);
-			const slash = path.lastIndexOf('/');
-			await loadDir(slash > 0 ? path.slice(0, slash + 1) : '/', { syncCwd: false });
-			if (disposed || loadGeneration !== generation + 1 || selector !== effectiveTerminalId ||
-				session !== chatId || !selectedTerminal) return;
-			await openEntry(
-				entries.find((entry) => entry.name === path.slice(slash + 1)) ?? {
-					name: path.slice(slash + 1), type: 'file', writable: currentWritable
-				},
-				{ page: file.page }
+		clearWorkspaceRetry(false);
+		directoryReady = false;
+		loading = true;
+		loadingStage = '正在连接工作空间';
+		error = null;
+		try {
+			const serverCwd = await directoryRequest<TerminalCwd>(terminal, session, '/files/cwd');
+			if (!current()) return;
+			if (!serverCwd?.cwd && !serverCwd?.root?.path && !serverCwd?.home)
+				throw new TerminalRequestError('Terminal 未返回工作空间目录', 502);
+			const serverPath = applyCwd(serverCwd);
+			savedPath = clampToFileRoot(
+				directory ?? (terminalContext?.terminalId === selector ? terminalContext.currentDirectory : serverPath)
 			);
-		} else {
-			await loadDir(initialDirectory ?? savedPath, { restoreTree: true, syncCwd: false });
+			directoryReady = true;
+			if (initialFile) {
+				const file = initialFile;
+				const path = normalizePath(file.path);
+				const slash = path.lastIndexOf('/');
+				if (!(await loadDir(slash > 0 ? path.slice(0, slash + 1) : '/', { syncCwd: false }))) return;
+				if (disposed || loadGeneration !== generation + 1 || selector !== effectiveTerminalId ||
+					session !== chatId || !selectedTerminal) return;
+				await openEntry(
+					entries.find((entry) => entry.name === path.slice(slash + 1)) ?? {
+						name: path.slice(slash + 1), type: 'file', writable: currentWritable
+					},
+					{ page: file.page }
+				);
+			} else {
+				await loadDir(directory ?? initialDirectory ?? savedPath, { restoreTree: true, syncCwd: false });
+			}
+		} catch (cause) {
+			if (!current()) return;
+			loading = false;
+			error = errorMessage(cause);
+			scheduleWorkspaceRetry(cause);
 		}
 	};
 
@@ -1941,7 +2045,7 @@
 		showHidden = localStorage.getItem('fileNav:showHidden') === 'true';
 		viewMode = localStorage.getItem('fileNav:viewMode') === 'grid' ? 'grid' : 'list';
 		const unsubFileNav = showFileNavPath.subscribe(displayFileRequest = async (request) => {
-			if (!manageFileRequests || !active || !request || !selectedTerminal || comparison) return;
+			if (!manageFileRequests || !active || !request || !selectedTerminal || !directoryReady || loading || comparison) return;
 			showFileNavPath.set(null);
 			let filePath = typeof request === 'string' ? request : request.path;
 			const targetPage = typeof request === 'string' ? null : request.page;
@@ -1959,7 +2063,7 @@
 			if (!(await protectBuffer())) return;
 			const selector = effectiveTerminalId,
 				session = chatId;
-			await loadDir(dir, { syncCwd: false });
+			if (!(await loadDir(dir, { syncCwd: false }))) return;
 			if (selector !== effectiveTerminalId || session !== chatId || currentPath !== dir || dirty)
 				return;
 			await tick();
@@ -1974,7 +2078,7 @@
 		});
 
 		const unsubFileNavDir = showFileNavDir.subscribe(displayDirectoryRequest = async (filePath) => {
-			if (!filePath || !selectedTerminal || effectiveTerminalId !== $selectedTerminalId) return;
+			if (!filePath || !selectedTerminal || !directoryReady || loading || effectiveTerminalId !== $selectedTerminalId) return;
 			showFileNavDir.set(null);
 			filePath = normalizePath(filePath);
 			if (!isInsideFileRoot(filePath)) {
@@ -2009,6 +2113,10 @@
 		const onBlur = () => (shiftKey = false);
 
 		const onVisibilityChange = () => {
+			if (active && document.visibilityState === 'visible' && error && !loading) {
+				void retryWorkspace();
+				return;
+			}
 			if (
 				active &&
 				document.visibilityState === 'visible' &&
@@ -2026,6 +2134,7 @@
 		window.addEventListener('keyup', onKeyUp);
 		window.addEventListener('blur', onBlur);
 		document.addEventListener('visibilitychange', onVisibilityChange);
+		window.addEventListener('online', onVisibilityChange);
 
 		return () => {
 			unsubFileNav();
@@ -2034,12 +2143,16 @@
 			window.removeEventListener('keyup', onKeyUp);
 			window.removeEventListener('blur', onBlur);
 			document.removeEventListener('visibilitychange', onVisibilityChange);
+			window.removeEventListener('online', onVisibilityChange);
 		};
 	});
 
 	onDestroy(() => {
 		disposed = true;
 		++loadGeneration;
+		workspacePreparation?.cancel();
+		clearWorkspaceRetry();
+		directoryController?.abort();
 		dirtyChoice?.resolve('cancel');
 		clearMatchRequest();
 		if (fileImageUrl) URL.revokeObjectURL(fileImageUrl);
@@ -2106,8 +2219,16 @@
 			strokeWidth={1.4}
 			class="text-gray-300 dark:text-gray-600 mb-2"
 		/>
-		<div class="text-xs text-gray-500 dark:text-gray-400">
-			{#if ensureTerminalChat}<Spinner />{:else}{$i18n.t('Start the chat to use this terminal.')}{/if}
+		<div class="text-xs text-gray-500 dark:text-gray-400" role="status" aria-live="polite">
+			{#if error}
+				<Tooltip content={error}>
+					<button type="button" on:click={() => void retryWorkspace()}>
+						{#if workspaceRetryDelay}正在重连（{workspaceRetryAttempt}/3）{:else}工作空间准备失败，点击重试{/if}
+					</button>
+				</Tooltip>
+			{:else if ensureTerminalChat}
+				<div class="flex items-center gap-2"><Spinner className="size-4" />{loadingStage}</div>
+			{:else}{$i18n.t('Start the chat to use this terminal.')}{/if}
 		</div>
 	</div>
 {:else if !selectedTerminal}
@@ -2635,12 +2756,16 @@
 						{$i18n.t('Uploading...')}
 					</div>
 				{:else if loading || (effectiveTerminalId && $terminalServers === null)}
-					<div class="flex justify-center pt-8"><Spinner className="size-4" /></div>
+					<div class="flex items-center justify-center gap-2 pt-8 text-xs text-gray-500" role="status" aria-live="polite">
+						<Spinner className="size-4" />{loadingStage}
+					</div>
 				{:else if error}
 					<div class="p-4 text-xs">
 						<Tooltip content={error}>
-							<button type="button" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300" on:click={() => void loadDir(currentPath, { syncCwd: false })}>
-								目录加载失败，点击重试
+							<button type="button" class="flex items-center gap-2 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300" on:click={() => void retryWorkspace()}>
+								{#if workspaceRetryDelay}
+									<Spinner className="size-3" />{workspaceRetryDelay} 秒后自动重试（{workspaceRetryAttempt}/3）
+								{:else}目录加载失败，点击重试{/if}
 							</button>
 						</Tooltip>
 					</div>
