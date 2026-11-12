@@ -35,7 +35,11 @@ from open_webui.utils.filter import (
 )
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.models import check_model_access, get_all_models
-from open_webui.utils.payload import apply_system_prompt_to_body, convert_chat_completions_payload_to_ollama
+from open_webui.utils.payload import (
+    apply_system_prompt_to_body,
+    convert_chat_completions_payload_to_ollama,
+    omit_reasoning_params,
+)
 from open_webui.utils.response import (
     convert_ollama_response_to_chat_completions,
     convert_ollama_stream_to_chat_completions,
@@ -113,6 +117,7 @@ async def generate_direct_chat_completion(
     models: dict,
 ):
     log.info('generate_direct_chat_completion')
+    omit_reasoning_params(form_data)
 
     metadata = form_data.pop('metadata', {})
 

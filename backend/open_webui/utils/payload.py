@@ -102,9 +102,29 @@ def apply_model_params_to_body(params: dict, form_data: dict, mappings: dict[str
     return form_data
 
 
+def omit_reasoning_params(payload: dict, *, force: bool = False) -> bool:
+    targets = [payload]
+    if isinstance(payload.get('options'), dict):
+        targets.append(payload['options'])
+    if not force and not any(target.get('reasoning_effort') == 'omit' for target in targets):
+        return False
+    for target in targets:
+        for key in ('reasoning_effort', 'reasoning', 'thinking', 'think'):
+            target.pop(key, None)
+        output_config = target.get('output_config')
+        if isinstance(output_config, dict):
+            output_config = {key: value for key, value in output_config.items() if key != 'effort'}
+            if output_config:
+                target['output_config'] = output_config
+            else:
+                target.pop('output_config', None)
+    return True
+
+
 def apply_params_to_form_data(form_data: dict, model: dict, params: dict | None = None) -> dict:
     payload_params = form_data.pop('params', {}) or {}
     params = payload_params if params is None else dict(params)
+    omit_reasoning = params.get('reasoning_effort') == 'omit'
     custom_params = params.pop('custom_params', {})
 
     open_webui_params = {
@@ -150,6 +170,11 @@ def apply_params_to_form_data(form_data: dict, model: dict, params: dict | None 
             except Exception as e:
                 log.exception(f'Error parsing logit_bias: {e}')
 
+    if omit_reasoning:
+        form_data['reasoning_effort'] = 'omit'
+        if model.get('owned_by') == 'ollama':
+            form_data['options']['reasoning_effort'] = 'omit'
+
     return form_data
 
 
@@ -185,6 +210,7 @@ def remove_open_webui_params(params: dict) -> dict:
 # inplace function: form_data is modified
 def apply_model_params_to_body_openai(params: dict, form_data: dict) -> dict:
     params = remove_open_webui_params(params)
+    omit_reasoning = params.get('reasoning_effort') == 'omit'
 
     custom_params = params.pop('custom_params', {})
     if custom_params:
@@ -200,6 +226,8 @@ def apply_model_params_to_body_openai(params: dict, form_data: dict) -> dict:
 
         # If there are custom parameters, we need to apply them first
         params = deep_update(params, custom_params)
+    if omit_reasoning:
+        params['reasoning_effort'] = 'omit'
 
     mappings = {
         'temperature': float,
@@ -219,6 +247,7 @@ def apply_model_params_to_body_openai(params: dict, form_data: dict) -> dict:
 
 def apply_model_params_to_body_ollama(params: dict, form_data: dict) -> dict:
     params = remove_open_webui_params(params)
+    omit_reasoning = params.get('reasoning_effort') == 'omit'
 
     custom_params = params.pop('custom_params', {})
     if custom_params:
@@ -234,6 +263,8 @@ def apply_model_params_to_body_ollama(params: dict, form_data: dict) -> dict:
 
         # If there are custom parameters, we need to apply them first
         params = deep_update(params, custom_params)
+    if omit_reasoning:
+        params['reasoning_effort'] = 'omit'
 
     # Convert OpenAI parameter names to Ollama parameter names if needed.
     name_differences = {

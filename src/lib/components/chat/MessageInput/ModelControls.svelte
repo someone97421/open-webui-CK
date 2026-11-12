@@ -7,6 +7,7 @@
 	import DropdownMenu from '$lib/components/common/DropdownMenu.svelte';
 	import DropdownSub from '$lib/components/common/DropdownSub.svelte';
 	import ModelControlSlider from './ModelControlSlider.svelte';
+	import ReasoningEffortSlider from './ReasoningEffortSlider.svelte';
 	import type { ModelControl } from '$lib/apis';
 	import { updateUserSettings } from '$lib/apis/users';
 	import { toast } from 'svelte-sonner';
@@ -152,6 +153,16 @@
 					</button>
 					{@render choices(active.model, active.key, active.control)}
 				{:else}
+					{#if controlsAllowed && ($user?.role === 'admin' || ($user?.permissions?.chat?.params ?? true))}
+						<ReasoningEffortSlider
+							value={params.reasoning_effort ?? null}
+							on:change={(event) => {
+								params = { ...params, reasoning_effort: event.detail };
+								onParamChange('reasoning_effort', event.detail);
+							}}
+						/>
+						<hr class="border-gray-200/30 dark:border-gray-700/25" />
+					{/if}
 					{#each available as model (model.id)}
 						{#if selectedModels.length > 1}
 							<div class="truncate px-2 pt-1.5 pb-0.5 text-xs text-gray-400 dark:text-gray-500">

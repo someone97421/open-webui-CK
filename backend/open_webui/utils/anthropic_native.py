@@ -257,13 +257,17 @@ def convert_chat_completions_to_anthropic(payload: dict) -> dict:
         effort = effort.strip().lower() or None
     thinking = result.get('thinking') or {}
     output_config = result.get('output_config') or {}
-    if effort is not None and thinking.get('type') in (None, 'adaptive'):
+    if effort in ('none', 'disabled'):
+        result['thinking'] = {'type': 'disabled'}
+        output_config = {key: value for key, value in output_config.items() if key != 'effort'}
+        if output_config:
+            result['output_config'] = output_config
+        else:
+            result.pop('output_config', None)
+    elif effort is not None and thinking.get('type') in (None, 'adaptive'):
         if 'effort' not in output_config:
             levels = {'minimal': 'low', 'low': 'low', 'medium': 'medium', 'high': 'high', 'xhigh': 'xhigh', 'max': 'max'}
-            if effort in ('none', 'disabled'):
-                if 'thinking' not in result:
-                    result['thinking'] = {'type': 'disabled'}
-            elif effort in levels:
+            if effort in levels:
                 output_config['effort'] = levels[effort]
                 result['output_config'] = output_config
                 result.setdefault('thinking', {'type': 'adaptive'})

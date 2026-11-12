@@ -42,6 +42,7 @@ from open_webui.utils.payload import (
     apply_model_params_to_body_ollama,
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
+    omit_reasoning_params,
 )
 from open_webui.utils.session_pool import cleanup_response, get_client_timeout, get_session, stream_wrapper
 from pydantic import BaseModel, ConfigDict, validator
@@ -1184,6 +1185,12 @@ async def generate_chat_completion(
 
     prefix_id = api_config.get('prefix_id')
     payload['model'] = strip_provider_model_prefix(payload['model'], prefix_id)
+    if not omit_reasoning_params(payload):
+        options = payload.get('options') or {}
+        if payload.get('reasoning_effort', options.get('reasoning_effort')) in ('none', 'disabled'):
+            payload.pop('reasoning_effort', None)
+            options.pop('reasoning_effort', None)
+            payload['think'] = False
 
     return await send_request(
         f'{url}/api/chat',
@@ -1383,6 +1390,7 @@ async def generate_openai_chat_completion(
 
     prefix_id = api_config.get('prefix_id')
     payload['model'] = strip_provider_model_prefix(payload['model'], prefix_id)
+    omit_reasoning_params(payload)
 
     return await send_request(
         f'{url}/v1/chat/completions',

@@ -62,6 +62,7 @@ from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
+    omit_reasoning_params,
 )
 from open_webui.utils.response import convert_responses_usage_to_chat_completions, get_responses_finish_reason
 from open_webui.utils.session_pool import (
@@ -1210,7 +1211,7 @@ def _normalize_stored_item(item: dict) -> dict:
     return {k: v for k, v in item.items() if k in allowed}
 
 
-def convert_to_responses_payload(payload: dict) -> dict:
+def convert_to_responses_payload(payload: dict, *, omit_reasoning: bool = False) -> dict:
     """
     Convert Chat Completions payload to Responses API format.
 
@@ -1338,6 +1339,7 @@ def convert_to_responses_payload(payload: dict) -> dict:
         input_items.append({'type': 'message', 'role': role, 'content': content_parts})
 
     responses_payload = {**payload, 'input': input_items}
+    omit_reasoning = omit_reasoning_params(responses_payload, force=omit_reasoning)
     effort = responses_payload.pop('reasoning_effort', None)
     reasoning = responses_payload.get('reasoning')
     model_name = re.sub(r'^(?:[a-z-]+\.)?openai\.', '', str(payload.get('model') or '').lower())
@@ -1346,15 +1348,19 @@ def convert_to_responses_payload(payload: dict) -> dict:
         and not model_name.startswith(('o1-mini', 'o1-preview'))
         and not re.search(r'-chat(?:-|$)', model_name)
     )
-    if isinstance(reasoning, dict) or effort is not None or (
+    reasoning_enabled = isinstance(reasoning, dict) or effort is not None or (
         'reasoning' not in responses_payload and known_reasoning_model
-    ):
+    )
+    if not omit_reasoning and reasoning_enabled:
         reasoning = dict(reasoning) if isinstance(reasoning, dict) else {}
         if effort is not None:
-            reasoning.setdefault('effort', effort)
-        if reasoning.get('effort') not in ('none', 'disabled'):
+            reasoning['effort'] = effort
+        if reasoning.get('effort') in ('none', 'disabled'):
+            reasoning.pop('summary', None)
+        else:
             reasoning.setdefault('summary', 'auto')
         responses_payload['reasoning'] = reasoning
+    if reasoning_enabled:
         include = responses_payload.get('include') or []
         include = [include] if isinstance(include, str) else list(include)
         if 'reasoning.encrypted_content' not in include:
@@ -1622,6 +1628,8 @@ async def generate_chat_completion(
         payload['continue_final_message'] = True
         payload['add_generation_prompt'] = False
 
+    omit_reasoning = omit_reasoning_params(payload)
+
     if api_config.get('azure') or api_config.get('provider') == 'azure':
         # Only set api-key header if not using Azure Entra ID authentication
         auth_type = api_config.get('auth_type', 'bearer')
@@ -1634,7 +1642,7 @@ async def generate_chat_completion(
 
         if is_azure_v1:
             if is_responses:
-                payload = convert_to_responses_payload(payload)
+                payload = convert_to_responses_payload(payload, omit_reasoning=omit_reasoning)
                 request_url = f'{url.rstrip("/")}/responses'
             else:
                 request_url = f'{url.rstrip("/")}/chat/completions'
@@ -1644,7 +1652,7 @@ async def generate_chat_completion(
             headers['api-version'] = api_version
 
             if is_responses:
-                payload = convert_to_responses_payload(payload)
+                payload = convert_to_responses_payload(payload, omit_reasoning=omit_reasoning)
                 payload.pop('model', None)
                 request_url = f'{request_url}/responses?api-version={api_version}'
             else:
@@ -1659,7 +1667,7 @@ async def generate_chat_completion(
             headers = prepare_anthropic_headers(headers, url, key, api_config)
             request_url = f'{url.rstrip("/")}/messages'
         elif is_responses:
-            payload = convert_to_responses_payload(payload)
+            payload = convert_to_responses_payload(payload, omit_reasoning=omit_reasoning)
             request_url = f'{url}/responses'
         else:
             request_url = f'{url}/chat/completions'
