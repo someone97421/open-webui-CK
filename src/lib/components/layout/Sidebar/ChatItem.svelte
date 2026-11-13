@@ -47,8 +47,7 @@
 		selectedFolder,
 		selectedTerminalId,
 		settings,
-		user,
-		folders
+		user
 	} from '$lib/stores';
 	import { refreshChatList, refreshSidebar } from '$lib/stores/chatList';
 
