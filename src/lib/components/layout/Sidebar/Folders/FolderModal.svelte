@@ -3,6 +3,8 @@
 	import type { Writable } from 'svelte/store';
 	import type { i18n as I18n } from 'i18next';
 
+	import Collapsible from '$lib/components/common/Collapsible.svelte';
+	import ModelSettingsLabel from '$lib/components/workspace/Models/ModelSettingsLabel.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Modal from '$lib/components/common/Modal.svelte';
 	import AccessButton from '$lib/components/common/AccessButton.svelte';
@@ -15,7 +17,6 @@
 	import ProjectAgentsEditor from '$lib/components/chat/Placeholder/ProjectAgentsEditor.svelte';
 	import FolderAttachmentDefaults from '$lib/components/chat/FolderAttachmentDefaults.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
-	import Collapsible from '$lib/components/common/Collapsible.svelte';
 	import AdvancedParams from '$lib/components/chat/Settings/Advanced/AdvancedParams.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
 	import { getFolderById } from '$lib/apis/folders';
@@ -100,7 +101,7 @@
 				name,
 				meta,
 				data: {
-					...data,
+					...Object.fromEntries(Object.entries(data).filter(([key]) => key !== 'share_mode')),
 					description: data.description.trim(),
 					model_ids: data.model_ids,
 					system_prompt: data.system_prompt,
@@ -428,11 +429,11 @@
 
 					<div class="my-2">
 						<Knowledge bind:selectedItems={data.files}>
-							<div slot="label">
-								<div class="flex w-full justify-between">
-									<div class="text-xs text-gray-500">{$i18n.t('Knowledge')}</div>
-								</div>
-							</div>
+							<ModelSettingsLabel
+								slot="label"
+								label={$i18n.t('Knowledge')}
+								description={$i18n.t('Attach knowledge bases, notes, or files for chats in this folder.')}
+							/>
 						</Knowledge>
 					</div>
 				{/if}

@@ -37,7 +37,7 @@ Set-Location backend
 - 前端：`npm run build`，先校验加密 WASM 并准备 Pyodide，产物在 `build/`。
 - 容器：`docker build -t open-webui-ck:local .` 或 `docker compose build open-webui`。Compose 使用本地镜像，启动前须完成构建。
 - 数据：`backend/data/` 或 Docker 的 `open-webui` 卷；更换环境前备份，勿提交私人数据与 `.env`。
-- 验证：默认按需手动执行；GitHub Actions 仅保留手动触发的基础验证，不发布包或镜像。
+- 验证：基础验证和个人 Docker Hub 镜像发布均仅手动触发，不引入上游自动发布流程。
 
 自动版本检查及对外遥测已禁用，插件市场、模型资源下载与本地业务统计保留。可选企业许可证校验仍按原有显式配置运行，详见初始化记录。
 

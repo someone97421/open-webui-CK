@@ -465,7 +465,7 @@ async def lifespan(app: FastAPI):
                         'path': '/internal',
                         'query_string': b'',
                         'headers': Headers({}).raw,
-                        'client': ('127.0.0.1', 12345),
+                        'client': ('', 12345),
                         'server': ('127.0.0.1', 80),
                         'scheme': 'http',
                         'app': app,
@@ -627,6 +627,7 @@ app.state.SCIM_TOKEN = SCIM_TOKEN
 # Models
 
 app.state.BASE_MODELS = []
+app.state.BASE_MODELS_SNAPSHOT = None
 
 # WebUI
 
@@ -1096,6 +1097,7 @@ async def chat_completion(
     model_item = form_data.pop('model_item', {})
     tasks = form_data.pop('background_tasks', None)
 
+
     metadata = {}
     try:
         model_info = None
@@ -1240,17 +1242,12 @@ async def chat_completion(
             tool_servers = None
 
         automation_id = form_data.pop('automation_id', None)
-        tool_approval_mode = (
-            'full'
-            if automation_id or chat_id.startswith('channel:')
-            else (
-                form_data.get('params', {}).get('tool_approval_mode')
-                if await Config.get('chat.tool_permissions.enable', False)
-                else 'full'
-            )
-            or 'full'
-        )
+        from open_webui.utils.tool_permissions import resolve_tool_approval_mode
 
+        tool_approval_mode = await resolve_tool_approval_mode(
+            form_data.get('params', {}).get('tool_approval_mode'),
+            is_channel_chat=chat_id.startswith('channel:'),
+        )
         approval_resume = getattr(request.state, 'tool_approval_resume', None)
         metadata = {
             'tool_approval_resume': approval_resume[2]
@@ -1258,6 +1255,7 @@ async def chat_completion(
             else None,
             'user_id': user.id,
             'user_agent': request.headers.get('user-agent', '') or '',
+            'client_ip': request.client.host if request.client else '',
             'internal': getattr(request.state, 'internal', False) is True,
             'chat_id': chat_id,
             'user_message': user_message,
@@ -1281,7 +1279,10 @@ async def chat_completion(
                 'messages': copy.deepcopy(
                     [message for message in form_data.get('messages', []) if message.get('role') == 'system']
                 ),
-                'params': {'system': request_params['system']} if 'system' in request_params else {},
+                'params': {
+                    **({'system': request_params['system']} if 'system' in request_params else {}),
+                    'tool_approval_mode': tool_approval_mode,
+                },
                 'chat_variables': copy.deepcopy(chat_variables),
             },
             'model': model,
@@ -1521,7 +1522,7 @@ async def chat_completion(
 
                         asyncio.create_task(run_initial_title_generation())
                 else:
-                    chat = await Chats.get_accessible_chat_by_id(chat_id, user, permission='write')
+                    chat = await Chats.get_accessible_chat_by_id(chat_id, user, permission='write', chat=existing_chat)
                     if not chat:
                         raise HTTPException(status_code=404, detail=ERROR_MESSAGES.NOT_FOUND)
 
@@ -1812,7 +1813,10 @@ async def chat_completion(
 
             if is_saved_chat_id(chat_id):
                 await Chats.upsert_message_to_chat_by_id_and_message_id(
-                    chat_id, assistant_message_id, {'meta': {'task_id': per_model_metadata['task_id']}}, touch=False
+                    chat_id,
+                    assistant_message_id,
+                    {'meta': {'task_id': per_model_metadata['task_id']}},
+                    touch=False,
                 )
 
             # Per-model form_data: own model
@@ -2289,8 +2293,14 @@ async def get_app_config(request: Request):
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail='Invalid token',
             )
-        if data is not None and 'id' in data and await is_valid_token(data, request.app.state.redis):
-            user = await Users.get_user_by_id(data['id'])
+        if data is not None and 'id' in data:
+            try:
+                if await is_valid_token(data, request.app.state.redis):
+                    user = await Users.get_user_by_id(data['id'])
+            except HTTPException as e:
+                # A deleted or deactivated account gets the public config
+                if e.status_code != status.HTTP_401_UNAUTHORIZED:
+                    raise
 
     group_defaults = None
     if user is not None and user.role in ('admin', 'user'):
@@ -2339,6 +2349,7 @@ async def get_app_config(request: Request):
         'notifications.enable',
         'chat.context_compaction.enable',
         'chat.tool_permissions.enable',
+        'chat.tool_permissions.auto.enable',
         'web.search.enable',
         'web.search.confirmation.enable',
         'web.search.confirmation.content',
@@ -2375,6 +2386,9 @@ async def get_app_config(request: Request):
         'audio.stt.engine',
         'rag.file.max_size',
         'rag.file.max_count',
+        'rag.full_context',
+        'rag.bypass_embedding_and_retrieval',
+        'rag.full_context_char_threshold',
         'file.image_compression_width',
         'file.image_compression_height',
         'user.permissions',
@@ -2450,6 +2464,9 @@ async def get_app_config(request: Request):
                     'enable_notifications': config.get('notifications.enable'),
                     'enable_context_compaction': config.get('chat.context_compaction.enable'),
                     'enable_tool_permissions': config.get('chat.tool_permissions.enable'),
+                    'enable_tool_permissions_auto': bool(
+                        config.get('chat.tool_permissions.enable') and config.get('chat.tool_permissions.auto.enable')
+                    ),
                     'enable_web_search': config.get('web.search.enable'),
                     'enable_web_search_confirmation': config.get('web.search.confirmation.enable'),
                     'web_search_confirmation_content': config.get('web.search.confirmation.content'),
@@ -2515,6 +2532,10 @@ async def get_app_config(request: Request):
                 'file': {
                     'max_size': config.get('rag.file.max_size'),
                     'max_count': config.get('rag.file.max_count'),
+                    'full_context': bool(
+                        config.get('rag.full_context') or config.get('rag.bypass_embedding_and_retrieval')
+                    ),
+                    'full_text_char_threshold': config.get('rag.full_context_char_threshold'),
                     'image_compression': {
                         'width': config.get('file.image_compression_width'),
                         'height': config.get('file.image_compression_height'),

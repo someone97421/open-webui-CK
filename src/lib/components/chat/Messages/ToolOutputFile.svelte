@@ -173,7 +173,7 @@
 		if (!current()) return;
 		const result = await excelToTable(workbook.Sheets[sheet]);
 		const DOMPurify = (await import('dompurify')).default;
-		if (current()) fileOfficeHtml = DOMPurify.sanitize(result.html);
+		if (current()) fileOfficeHtml = DOMPurify.sanitize(result.html, { ADD_ATTR: ['target'] });
 	}
 
 	async function loadPreview(key: string) {
@@ -231,10 +231,11 @@
 					const result = await blobForPreview();
 					if (!current()) return;
 					if (!result) throw new Error(t('Preview failed'));
-					const buffer = await result.blob.arrayBuffer();
-					const XLSX = await import('xlsx');
+					const arrayBuffer = await result.blob.arrayBuffer();
+					const { readExcelWorkbook } = await import('$lib/utils/excelToTable');
+					const workbook = await readExcelWorkbook(arrayBuffer);
 					if (!current()) return;
-					excelWorkbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
+					excelWorkbook = workbook;
 					excelSheetNames = excelWorkbook.SheetNames;
 					if (excelSheetNames.length) await loadExcelSheet(excelSheetNames[0], generation);
 				}

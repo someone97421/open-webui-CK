@@ -231,6 +231,7 @@ let STT_ENABLED = true;
 	};
 
 	const sttModelUpdateHandler = async () => {
+		if (STT_WHISPER_MODEL_LOADING) return;
 		STT_WHISPER_MODEL_LOADING = true;
 		await updateConfigHandler();
 		STT_WHISPER_MODEL_LOADING = false;
@@ -675,12 +676,12 @@ let STT_ENABLED = true;
 							bind:value={STT_WHISPER_MODEL}
 						/>
 						<button
-							class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-black/5 hover:text-gray-900 disabled:opacity-50 dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-white"
+							class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-black/5 hover:text-gray-900 aria-disabled:opacity-50 dark:text-gray-500 dark:hover:bg-white/5 dark:hover:text-white"
 							type="button"
 							on:click={() => {
 								sttModelUpdateHandler();
 							}}
-							disabled={STT_WHISPER_MODEL_LOADING}
+							aria-disabled={STT_WHISPER_MODEL_LOADING}
 							aria-label={$i18n.t('settings.admin.audio.updateModel.label')}
 						>
 							{#if STT_WHISPER_MODEL_LOADING}

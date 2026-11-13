@@ -57,6 +57,7 @@ from open_webui.utils.misc import (
     get_provider_function,
     get_reasoning_details,
     get_replayable_responses_reasoning,
+    merge_tool_call_batches,
 )
 from open_webui.utils.model_ids import strip_provider_model_prefix
 from open_webui.utils.payload import (
@@ -1231,7 +1232,7 @@ def convert_to_responses_payload(payload: dict, *, omit_reasoning: bool = False)
         # Check for stored output items (from previous Responses API turn)
         stored_output = msg.get('output')
         if stored_output and isinstance(stored_output, list):
-            for item in stored_output:
+            for item in merge_tool_call_batches(stored_output):
                 if item.get('type') == 'reasoning':
                     item = get_replayable_responses_reasoning(item)
                     if not item or payload.get('previous_response_id'):
@@ -1661,7 +1662,12 @@ async def generate_chat_completion(
     else:
         if is_messages:
             try:
-                payload = convert_chat_completions_to_anthropic(payload)
+                context_tools = {
+                    item['call_id']: item.get('name', '')
+                    for item in (metadata or {}).get('initial_output', [])
+                    if item.get('type') == 'function_call' and item.get('hidden') and item.get('call_id')
+                }
+                payload = convert_chat_completions_to_anthropic(payload, context_tools=context_tools)
             except (ValueError, KeyError, TypeError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             headers = prepare_anthropic_headers(headers, url, key, api_config)
@@ -1677,8 +1683,14 @@ async def generate_chat_completion(
     if not is_responses and not is_messages and 'messages' in payload:
         for message in payload['messages']:
             if message.get('role') == 'tool' and isinstance(message.get('content'), list):
-                message['content'] = ''.join(
-                    part.get('text', '') for part in message['content'] if part.get('type') in ('input_text', 'text')
+                parts = message['content']
+                text = ''.join(part.get('text', '') for part in parts if part.get('type') in ('input_text', 'text'))
+                cache_control = next(
+                    (part['cache_control'] for part in reversed(parts) if part.get('cache_control')), None
+                )
+                # Prompt-cache markers only work on a content block, so keep the text as one
+                message['content'] = (
+                    [{'type': 'text', 'text': text, 'cache_control': cache_control}] if cache_control and text else text
                 )
 
     is_streaming_request = bool(payload.get('stream', False))

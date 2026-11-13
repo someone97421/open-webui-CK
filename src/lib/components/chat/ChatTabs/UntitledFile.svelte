@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getContext, onDestroy, onMount, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
+	import { chatId as activeChatId, user } from '$lib/stores';
 	import { formatFileSize } from '$lib/utils';
 	import {
 		getCwd,
@@ -17,6 +18,7 @@
 	import ConfirmDialog from '../../common/ConfirmDialog.svelte';
 
 	const i18n = getContext<any>('i18n');
+	const ensureWorkspaceChat = getContext<(() => Promise<string | null>) | undefined>('ensureWorkspaceChat');
 	export let label: string;
 	export let connection: TerminalConnection;
 	export let chatId: string | null = null;
@@ -24,12 +26,20 @@
 	export let dirty = false;
 	export let onSaved: (path: string) => void;
 	export let isOpen: (path: string) => boolean;
-	let value = '';
+	export let initialView: any = null;
+	let value = initialView?.value ?? '';
+	export const captureView = () => ({
+		value,
+		fileName,
+		directory,
+		editor: editor?.captureView(),
+		dirty: dirty || saving
+	});
 	let editor: FileCodeEditor;
 	let saving = false;
 	let showSave = false;
-	let fileName = label;
-	let directory = initialDirectory ?? '/';
+	let fileName = initialView?.fileName ?? label;
+	let directory = initialView?.directory ?? initialDirectory ?? '/';
 	let root = '/';
 	let entries: FileEntry[] = [];
 	let loading = false;
@@ -38,19 +48,29 @@
 	let error = '';
 	let replacePath = '';
 	let disposed = false;
+	let writeController: AbortController | null = null;
+	let writeIsCurrent: (() => boolean) | null = null;
+	$: {
+		connection; chatId; $activeChatId; $user;
+		if (writeIsCurrent && !writeIsCurrent()) writeController?.abort();
+	}
 	let fileNameInput: HTMLInputElement;
 	let saveResult: ((saved: boolean) => void) | null = null;
-	let closeChoice: ((choice: 'save' | 'discard' | 'cancel') => void) | null = null;
+	let closeChoice: ((confirmed: boolean) => void) | null = null;
+	let saveVersion = 0;
 	$: dirty = value.length > 0;
 	$: byteCount = new TextEncoder().encode(value).length;
 	$: fullPath = joinTerminalPath(directory, fileName.trim());
 	$: if (fullPath !== replacePath) replacePath = '';
 
 	const browse = async (path: string) => {
+		const version = saveVersion;
+		const target = { ...connection, chatId };
 		loading = true;
 		error = '';
 		const listing = await listFiles(connection.baseUrl, connection.key, path, chatId ?? undefined);
-		if (disposed) return;
+		if (disposed || !showSave || version !== saveVersion || chatId !== target.chatId ||
+			connection.selector !== target.selector || connection.baseUrl !== target.baseUrl || connection.key !== target.key) return;
 		loading = false;
 		writable = listing?.writable !== false && !!listing;
 		if (!listing) {
@@ -61,6 +81,8 @@
 		entries = listing.entries;
 	};
 	const finishSave = (saved: boolean) => {
+		++saveVersion;
+		writeController?.abort();
 		showSave = false;
 		saveResult?.(saved);
 		saveResult = null;
@@ -74,17 +96,41 @@
 		loading = true;
 		fileName = label;
 		replacePath = '';
-		const cwd = await getCwd(connection.baseUrl, connection.key, chatId ?? undefined);
-		if (disposed || !showSave) return false;
-		root = (cwd?.root?.path ?? '/').replace(/\/$/, '') || '/';
-		await browse(initialDirectory ?? cwd?.cwd ?? cwd?.home ?? root);
-		await tick();
-		fileNameInput?.focus();
-		fileNameInput?.select();
+		const version = ++saveVersion;
+		const target = { ...connection };
+		const originalChatId = chatId;
+		const originalUserId = $user?.id;
+		let sessionId: string | null = null;
+		const current = () => !disposed && showSave && saveVersion === version &&
+			$user?.id === originalUserId && connection.selector === target.selector &&
+			connection.baseUrl === target.baseUrl && connection.key === target.key &&
+			(!originalChatId || chatId === originalChatId) &&
+			(!sessionId || ((!chatId || chatId === sessionId) && $activeChatId === sessionId));
+		try {
+			if (originalChatId && $activeChatId !== originalChatId) throw new Error('会话已切换，请重新打开文件。');
+			sessionId = await ensureWorkspaceChat?.() ?? null;
+			await tick();
+			if (!sessionId) throw new Error('无法准备工作空间会话，请重试。');
+			if (!current() || (originalChatId && sessionId !== originalChatId)) return false;
+			chatId = sessionId;
+			const cwd = await getCwd(target.baseUrl, target.key, sessionId);
+			if (!current()) return false;
+			root = (cwd?.root?.path ?? '/').replace(/\/$/, '') || '/';
+			await browse(initialDirectory ?? cwd?.cwd ?? cwd?.home ?? root);
+			await tick();
+			if (!current()) return false;
+			fileNameInput?.focus();
+			fileNameInput?.select();
+		} catch (reason) {
+			if (current()) {
+				error = reason instanceof Error ? reason.message : String(reason);
+				loading = false;
+			}
+		}
 		return result;
 	};
 	const write = async () => {
-		if (saving || loading || !writable) return;
+		if (disposed || saving || loading || !writable || !showSave) return;
 		const name = fileName.trim();
 		if (!name || name === '.' || name === '..' || /[\\/\0]/.test(name)) {
 			error = $i18n.t('Enter a file name without slashes.');
@@ -94,60 +140,74 @@
 			error = $i18n.t('This file is already open. Close its tab or choose another name.');
 			return;
 		}
+		const target = { ...connection, directory, path: fullPath, content: value };
+		const originalChatId = chatId || null;
+		const originalUserId = $user?.id;
+		let sessionId: string | null = null;
+		const controller = new AbortController();
+		const current = () => !disposed && showSave && !controller.signal.aborted &&
+			$user?.id === originalUserId && connection.selector === target.selector &&
+			connection.baseUrl === target.baseUrl && connection.key === target.key &&
+			(!originalChatId || chatId === originalChatId) &&
+			(!sessionId || ((!chatId || chatId === sessionId) && $activeChatId === sessionId));
+		writeController = controller;
+		writeIsCurrent = current;
 		saving = true;
 		error = '';
 		try {
-			const listing = await listFiles(
-				connection.baseUrl,
-				connection.key,
-				directory,
-				chatId ?? undefined
-			);
+			if (originalChatId && $activeChatId !== originalChatId) throw new Error('会话已切换，请重新打开文件。');
+			sessionId = await ensureWorkspaceChat?.() ?? null;
+			await tick();
+			if (!sessionId) throw new Error('无法准备工作空间会话，请重试。');
+			if (!current() || (originalChatId && sessionId !== originalChatId)) return;
+			const listing = await listFiles(target.baseUrl, target.key, target.directory, sessionId, controller.signal);
+			if (!current()) return;
 			if (!listing || listing.writable === false) throw new Error($i18n.t('File is not writable.'));
 			const existing = listing.entries.find((entry) => entry.name === name);
 			if (existing?.type === 'directory' || existing?.writable === false)
 				throw new Error($i18n.t('File is not writable.'));
-			if (existing && replacePath !== fullPath) {
-				replacePath = fullPath;
+			if (existing && replacePath !== target.path) {
+				replacePath = target.path;
 				error = $i18n.t('A file with this name already exists. Replace it?');
 				return;
 			}
-			const result = await uploadToTerminal(
-				connection.baseUrl,
-				connection.key,
-				directory,
-				new File([value], name, { type: 'text/plain' }),
-				chatId ?? undefined
-			);
-			if (!result)
-				throw new Error($i18n.t('Failed to save file. Your changes are still in the editor.'));
+			const result = await uploadToTerminal(target.baseUrl, target.key, target.directory,
+				new File([target.content], name, { type: 'text/plain' }), sessionId, controller.signal);
+			if (!current()) return;
+			if (!result) throw new Error($i18n.t('Failed to save file. Your changes are still in the editor.'));
 			dirty = false;
 			finishSave(true);
-			onSaved(result.path || fullPath);
+			onSaved(result.path || target.path);
 		} catch (reason) {
-			error = reason instanceof Error ? reason.message : String(reason);
+			if (current()) error = reason instanceof Error ? reason.message : String(reason);
 		} finally {
-			saving = false;
+			if (writeController === controller) {
+				writeController = null;
+				writeIsCurrent = null;
+				saving = false;
+			}
 		}
 	};
 	export const hasUnsavedChanges = () => dirty || saving;
 	export const requestClose = async () => {
 		if (saving || showSave || closeChoice) return false;
 		if (!dirty) return true;
-		const choice = await new Promise<'save' | 'discard' | 'cancel'>((resolve) => {
+		const confirmed = await new Promise<boolean>((resolve) => {
 			closeChoice = resolve;
 		});
 		closeChoice = null;
 		await tick();
-		return choice === 'discard' || (choice === 'save' && (await save()));
+		return confirmed;
 	};
 	onMount(() => {
+		editor?.restoreView(initialView?.editor);
 		editor?.focus();
 	});
 	onDestroy(() => {
 		disposed = true;
+		writeController?.abort();
 		saveResult?.(false);
-		closeChoice?.('cancel');
+		closeChoice?.(false);
 	});
 </script>
 
@@ -212,8 +272,12 @@
 				><input type="checkbox" bind:checked={showHidden} />{$i18n.t('Hidden')}</label
 			>
 		</div>
-		<div class="min-h-24 overflow-y-auto py-1">
-			{#if loading}<p class="p-3 text-xs text-gray-400">{$i18n.t('Loading...')}</p>
+		<div class="min-h-24 overflow-y-auto py-1" class:flex={loading} class:flex-col={loading}>
+			{#if loading}<p
+					class="flex flex-1 items-center justify-center p-3 text-center text-xs text-gray-400"
+				>
+					{$i18n.t('Loading...')}
+				</p>
 			{:else}{#each entries.filter((entry) => entry.type === 'directory' && (showHidden || !entry.name.startsWith('.'))) as entry}
 					<button
 						type="button"
@@ -249,12 +313,10 @@
 
 <ConfirmDialog
 	show={closeChoice !== null}
+	confirmFirst
+	primaryAction="cancel"
 	title={$i18n.t('Unsaved changes')}
-	confirmLabel={$i18n.t('Save')}
-	on:confirm={() => closeChoice?.('save')}
-	on:cancel={() => closeChoice?.('cancel')}
->
-	<button class="rounded-lg px-3 py-2 text-sm" on:click={() => closeChoice?.('discard')}
-		>{$i18n.t('Discard changes')}</button
-	>
-</ConfirmDialog>
+	message={$i18n.t('Discard unsaved changes and close this file?')}
+	on:confirm={() => closeChoice?.(true)}
+	on:cancel={() => closeChoice?.(false)}
+/>

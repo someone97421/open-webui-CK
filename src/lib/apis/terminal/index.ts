@@ -79,7 +79,31 @@ export type ListeningPort = {
 	process: string | null;
 };
 
+export type TerminalSystemInfo = {
+	sampled_at: number;
+	hostname: string;
+	os: string;
+	arch: string;
+	environment: 'host' | 'container';
+	uptime_seconds: number | null;
+	service_uptime_seconds: number;
+	cpu: { percent: number | null; cores: number | null; scope: 'host' | 'cgroup' };
+	memory: { total: number; used: number; scope: 'host' | 'cgroup' } | null;
+	disk: { path: string; total: number; used: number; free: number } | null;
+	network: { name: string; up: boolean | null; addresses: string[] }[] | null;
+	process_scope: 'user' | 'environment';
+	processes:
+		| {
+				pid: number;
+				name: string;
+				cpu_percent: number | null;
+				memory_bytes: number;
+		  }[]
+		| null;
+};
+
 export type TerminalFeatures = {
+	agents?: boolean;
 	terminal?: boolean;
 	browser?: boolean;
 	desktop?: boolean;
@@ -90,7 +114,7 @@ export type TerminalFeatures = {
 
 // Missing flags mean unsupported; never probe a new endpoint on an older server.
 export async function getTerminalFeatures(
-	connection: TerminalConnection,
+	connection: Pick<TerminalConnection, 'baseUrl' | 'key'>,
 	chatId: string | null,
 	signal?: AbortSignal
 ): Promise<TerminalFeatures> {
@@ -218,7 +242,9 @@ export const resolveTerminalConnection = (
 		return {
 			selector,
 			baseUrl: `${WEBUI_API_BASE_URL}/terminals/${encodeURIComponent(selector)}`,
-			key: token,
+			get key() {
+				return typeof localStorage === 'undefined' ? token : (localStorage.getItem('token') ?? '');
+			},
 			system: true
 		};
 	}
@@ -236,12 +262,13 @@ export class TerminalRequestError extends Error {
 }
 
 export const terminalRequest = async <T>(
-	connection: TerminalConnection,
+	connection: Pick<TerminalConnection, 'baseUrl' | 'key'>,
 	chatId: string | null,
 	path: string,
 	options: RequestInit = {}
 ): Promise<T> => {
-	if (!get(config)?.features?.enable_tool_servers) throw new Error('Tool servers are disabled');
+	if (!get(config)?.features?.enable_tool_servers)
+		throw new TerminalRequestError('Tool servers are disabled', 403);
 	const response = await fetch(`${connection.baseUrl}${path}`, {
 		...options,
 		headers: {
@@ -370,7 +397,8 @@ export const searchFiles = async (
 	limit: number = 20,
 	type: 'file' | 'directory' | 'any' = 'any',
 	sessionId?: string,
-	showHidden: boolean = false
+	showHidden: boolean = false,
+	signal?: AbortSignal
 ): Promise<TerminalFileSearchResponse | null> => {
 	const headers: Record<string, string> = bearerHeaders(apiKey);
 	if (sessionId) headers['X-Session-Id'] = sessionId;
@@ -384,13 +412,16 @@ export const searchFiles = async (
 	});
 	const base = baseUrl.replace(/\/$/, '');
 	const searchRes = await fetch(`${base}/files/search?${searchParams.toString()}`, {
-		headers
+		headers,
+		signal
 	}).catch(() => null);
 
 	if (searchRes?.ok) {
 		const json = await searchRes.json().catch(() => null);
 		if (Array.isArray(json?.results)) return { results: json.results };
 	}
+
+	if (signal?.aborted) return null;
 
 	const globParams = new URLSearchParams({
 		pattern: query.trim() ? `*${query.trim()}*` : '*',
@@ -399,9 +430,10 @@ export const searchFiles = async (
 		max_results: String(limit)
 	});
 	const globRes = await fetch(`${base}/files/glob?${globParams.toString()}`, {
-		headers
+		headers,
+		signal
 	}).catch((err) => {
-		console.error('open-terminal searchFiles error:', err);
+		if (!signal?.aborted) console.error('open-terminal searchFiles error:', err);
 		return null;
 	});
 	if (!globRes?.ok) return null;

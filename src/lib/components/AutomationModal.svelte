@@ -11,7 +11,7 @@
 	import DestinationDropdown from '$lib/components/automations/DestinationDropdown.svelte';
 	import { getFolders } from '$lib/apis/folders';
 	import { getChannels } from '$lib/apis/channels';
-	import { channels, folders } from '$lib/stores';
+	import { baseModels, channels, folders } from '$lib/stores';
 
 	import {
 		createAutomation,
@@ -188,7 +188,12 @@
 			<div class="flex items-center gap-0.5 flex-wrap min-w-0 sm:flex-1">
 				<ScheduleDropdown bind:this={scheduleDropdown} side="top" align="start" />
 
-				<ModelDropdown bind:model_id side="top" align="start" />
+				<ModelDropdown
+					bind:model_id
+					items={$baseModels.filter((model) => !('direct' in model && model.direct))}
+					side="top"
+					align="start"
+				/>
 
 				<DestinationDropdown
 					bind:target_type

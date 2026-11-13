@@ -56,7 +56,6 @@
 	let splitLargeChunks = false;
 	let scrollOnBranchChange = true;
 	let scrollOnResponseGeneration = true;
-	let showFilesOnTerminalSelect = true;
 	let terminalFileDisplay: 'attachment' | 'sidebar' | 'inline' = 'attachment';
 	let userLocation = false;
 
@@ -70,6 +69,7 @@
 
 	let richTextInput = true;
 	let showFormattingToolbar = false;
+	let showInputSelections = false;
 	let insertPromptAsRichText = false;
 	let promptAutocomplete = false;
 
@@ -213,13 +213,13 @@
 	};
 
 	const toggleResponseAutoCopy = async () => {
-		if (externalSettings) {
+		if (externalSettings || !responseAutoCopy) {
 			saveSettings({ responseAutoCopy: responseAutoCopy });
 			return;
 		}
 
 		const permission = await navigator.clipboard
-			.readText()
+			?.readText()
 			.then(() => {
 				return 'granted';
 			})
@@ -354,6 +354,7 @@
 
 		richTextInput = currentSettings?.richTextInput ?? true;
 		showFormattingToolbar = currentSettings?.showFormattingToolbar ?? false;
+		showInputSelections = currentSettings?.showInputSelections ?? false;
 		insertPromptAsRichText = currentSettings?.insertPromptAsRichText ?? false;
 		promptAutocomplete = currentSettings?.promptAutocomplete ?? false;
 
@@ -379,7 +380,6 @@
 		splitLargeChunks = currentSettings?.splitLargeChunks ?? false;
 		scrollOnBranchChange = currentSettings?.scrollOnBranchChange ?? true;
 		scrollOnResponseGeneration = currentSettings?.scrollOnResponseGeneration ?? true;
-		showFilesOnTerminalSelect = currentSettings?.showFilesOnTerminalSelect ?? true;
 		terminalFileDisplay = currentSettings?.terminalFileDisplay === 'sidebar' ? 'sidebar' :
 			currentSettings?.terminalFileDisplay === 'inline' ? 'inline' : 'attachment';
 
@@ -1518,33 +1518,6 @@
 		<div>
 			<div class={settingRowClass}>
 				<label
-					id="show-files-on-terminal-select-label"
-					class={settingLabelClass}
-					for="show-files-on-terminal-select-label-control"
-				>
-					{$i18n.t('settings.personal.interface.showFilesOnTerminalSelect.label')}
-				</label>
-
-				<div class={settingControlClass}>
-					<Switch
-						ariaLabelledbyId="show-files-on-terminal-select-label"
-						tooltip={true}
-						bind:state={showFilesOnTerminalSelect}
-						inherited={isDefaultSetting('showFilesOnTerminalSelect')}
-						on:change={() => {
-							saveSettings({ showFilesOnTerminalSelect });
-						}}
-					/>
-				</div>
-			</div>
-			<p class={settingDescriptionClass}>
-				{$i18n.t('settings.personal.interface.showFilesOnTerminalSelect.description')}
-			</p>
-		</div>
-
-		<div>
-			<div class={settingRowClass}>
-				<label
 					id="terminal-preview-allow-same-origin-label"
 					class={settingLabelClass}
 					for="terminal-preview-allow-same-origin-label-control"
@@ -1707,6 +1680,33 @@
 		</p>
 	</div>
 
+	<div>
+		<div class={settingRowClass}>
+			<label
+				id="show-input-selections-label"
+				class={settingLabelClass}
+				for="show-input-selections-label-control"
+			>
+				{$i18n.t('settings.personal.interface.showInputSelections.label')}
+			</label>
+
+			<div class={settingControlClass}>
+				<Switch
+					ariaLabelledbyId="show-input-selections-label"
+					tooltip={true}
+					bind:state={showInputSelections}
+					inherited={isDefaultSetting('showInputSelections')}
+					on:change={() => {
+						saveSettings({ showInputSelections });
+					}}
+				/>
+			</div>
+		</div>
+		<p class={settingDescriptionClass}>
+			{$i18n.t('settings.personal.interface.showInputSelections.description')}
+		</p>
+	</div>
+
 	{#if $visibleControls['settings.rich_text_input']}
 		<div>
 			<div class={settingRowClass}>
@@ -1842,9 +1842,11 @@
 		</div>
 	{/if}
 
-	<div class={sectionHeadingClass}>
-		{$i18n.t('settings.personal.interface.sections.artifacts.title')}
-	</div>
+	{#if ['settings.detect_artifacts', 'settings.iframe_sandbox_allow_scripts', 'settings.iframe_sandbox_allow_same_origin', 'settings.iframe_sandbox_allow_forms', 'settings.iframe_sandbox_allow_downloads'].some((id) => $visibleControls[id])}
+		<div class={sectionHeadingClass}>
+			{$i18n.t('settings.personal.interface.sections.artifacts.title')}
+		</div>
+	{/if}
 
 	{#if $visibleControls['settings.detect_artifacts']}
 		<div>

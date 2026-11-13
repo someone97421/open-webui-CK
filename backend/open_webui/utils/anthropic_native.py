@@ -141,7 +141,7 @@ def _convert_tool_choice(choice):
     raise ValueError('不支持的 tool_choice 格式')
 
 
-def convert_chat_completions_to_anthropic(payload: dict) -> dict:
+def convert_chat_completions_to_anthropic(payload: dict, *, context_tools: dict[str, str] | None = None) -> dict:
     """转换请求且不修改输入；max_completion_tokens 优先，默认额度为 4096。"""
     result = {
         key: deepcopy(payload[key])
@@ -166,6 +166,7 @@ def convert_chat_completions_to_anthropic(payload: dict) -> dict:
         result['metadata'] = {'user_id': user_id}
 
     system = _content_blocks(payload.get('system'))
+    context_tools = context_tools or {}
     messages = []
     for message in payload.get('messages', []):
         role = message.get('role')
@@ -175,14 +176,20 @@ def convert_chat_completions_to_anthropic(payload: dict) -> dict:
         if role == 'tool':
             if not message.get('tool_call_id'):
                 raise ValueError('工具结果缺少 tool_call_id')
-            tool_result = {
-                'type': 'tool_result',
-                'tool_use_id': message['tool_call_id'],
-                'content': _content_blocks(message.get('content')),
-            }
-            if 'is_error' in message:
-                tool_result['is_error'] = message['is_error']
-            blocks = [_cache_control(message, tool_result)]
+            if message['tool_call_id'] in context_tools:
+                blocks = [
+                    {'type': 'text', 'text': f"[Internal context: {context_tools[message['tool_call_id']]}]"},
+                    *_content_blocks(message.get('content')),
+                ]
+            else:
+                tool_result = {
+                    'type': 'tool_result',
+                    'tool_use_id': message['tool_call_id'],
+                    'content': _content_blocks(message.get('content')),
+                }
+                if 'is_error' in message:
+                    tool_result['is_error'] = message['is_error']
+                blocks = [_cache_control(message, tool_result)]
             role = 'user'
         elif role in ('user', 'assistant'):
             blocks = _content_blocks(message.get('content'))
@@ -191,6 +198,8 @@ def convert_chat_completions_to_anthropic(payload: dict) -> dict:
                 blocks = [block for block in blocks if block['type'] not in ('thinking', 'redacted_thinking')]
                 blocks = (_reasoning_blocks(message) or thinking) + blocks
                 for call in message.get('tool_calls') or []:
+                    if call.get('id') in context_tools:
+                        continue
                     if call.get('type', 'function') != 'function':
                         raise ValueError('Anthropic 仅支持 function 工具调用')
                     function = call['function']

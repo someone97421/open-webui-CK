@@ -6,13 +6,14 @@
 
 	const i18n = getContext('i18n');
 
-	import { config as appConfig } from '$lib/stores';
+	import { config as appConfig, tools } from '$lib/stores';
 	import { DEFAULT_CAPABILITIES } from '$lib/constants';
 	import { getModelsConfig, setModelsConfig } from '$lib/apis/configs';
 	import { getBackendConfig } from '$lib/apis';
-
+	import { getTools } from '$lib/apis/tools';
 	import AdvancedParams from '$lib/components/chat/Settings/Advanced/AdvancedParams.svelte';
 	import Capabilities from '$lib/components/workspace/Models/Capabilities.svelte';
+	import ToolsSelector from '$lib/components/workspace/Models/ToolsSelector.svelte';
 
 	export let initHandler = () => {};
 	export let dirty = false;
@@ -26,6 +27,7 @@
 
 	let defaultCapabilities = {};
 	let defaultFeatureIds = [];
+	let toolIds = [];
 	let defaultParams = {};
 	let builtinTools = {};
 
@@ -38,6 +40,7 @@
 		JSON.stringify({
 			defaultCapabilities,
 			defaultFeatureIds,
+			toolIds,
 			defaultParams: Object.fromEntries(configuredParams),
 			builtinTools
 		});
@@ -47,6 +50,7 @@
 		dirty = savedSnapshot !== '' && getSnapshot() !== savedSnapshot;
 	};
 
+	$: (toolIds, updateDirty());
 
 	const init = async () => {
 		loading = true;
@@ -54,14 +58,18 @@
 
 		const savedMeta = config?.DEFAULT_MODEL_METADATA;
 		if (savedMeta && Object.keys(savedMeta).length > 0) {
-			defaultCapabilities = savedMeta.capabilities ?? { ...DEFAULT_CAPABILITIES };
+			defaultCapabilities = { ...DEFAULT_CAPABILITIES, ...(savedMeta.capabilities ?? {}) };
 			defaultFeatureIds = savedMeta.defaultFeatureIds ?? [];
 			builtinTools = savedMeta.builtinTools ?? {};
+			toolIds = savedMeta.toolIds ?? [];
 		} else {
 			defaultCapabilities = { ...DEFAULT_CAPABILITIES };
 			defaultFeatureIds = [];
 			builtinTools = {};
+			toolIds = [];
 		}
+
+		await tools.set((await getTools(localStorage.token).catch(() => null)) ?? []);
 
 		defaultParams = config?.DEFAULT_MODEL_PARAMS ?? {};
 		savedSnapshot = getSnapshot();
@@ -77,7 +85,8 @@
 		const metadata = {
 			capabilities: defaultCapabilities,
 			...(defaultFeatureIds.length > 0 ? { defaultFeatureIds } : {}),
-			...(Object.keys(builtinTools).length > 0 ? { builtinTools } : {})
+			...(Object.keys(builtinTools).length > 0 ? { builtinTools } : {}),
+			...(toolIds.length > 0 ? { toolIds } : {})
 		};
 
 		config = await getModelsConfig(localStorage.token);
@@ -164,12 +173,15 @@
 						>
 							<Capabilities
 								bind:capabilities={defaultCapabilities}
+								functionCalling={defaultParams.function_calling}
 								bind:defaultFeatureIds
 								bind:builtinTools
 							/>
 						</div>
 					{/if}
 				</div>
+
+				<ToolsSelector bind:selectedToolIds={toolIds} tools={$tools ?? []} />
 
 				<div>
 					<button

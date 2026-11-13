@@ -4,7 +4,7 @@ import logging
 import re
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 from open_webui.events import EVENT_DEFINITIONS_BY_NAME, NOTIFICATION_EVENTS
 from open_webui.models.config import Config
@@ -387,7 +387,10 @@ async def notify_target(
 
 
 async def dispatch_notification_event(app: Any, event: Any) -> None:
-    if event.event not in VALID_EVENTS or not await Config.get('ui.enable_user_webhooks'):
+    if event.event not in VALID_EVENTS:
+        return
+
+    if not await Config.get('ui.enable_user_webhooks'):
         return
 
     from open_webui.events import event_user_ids

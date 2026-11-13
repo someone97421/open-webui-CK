@@ -9,6 +9,7 @@
 	const i18n: any = getContext('i18n');
 
 	import {
+		baseModels,
 		channelRequestQueues,
 		channels,
 		models,
@@ -134,12 +135,20 @@
 
 	const textVariableHandler = async (text: string) => {
 		if (text.includes('{{CLIPBOARD}}')) {
-			const clipboardText = await navigator.clipboard.readText().catch((err) => {
+			let clipboardText: string;
+			try {
+				clipboardText = await navigator.clipboard.readText();
+			} catch (error) {
 				toast.error($i18n.t('Failed to read clipboard contents'));
-				return '{{CLIPBOARD}}';
-			});
+				clipboardText = '{{CLIPBOARD}}';
+			}
 
-			const clipboardItems = await navigator.clipboard.read();
+			let clipboardItems: ClipboardItem[] = [];
+			try {
+				clipboardItems = await navigator.clipboard.read();
+			} catch (error) {
+				console.error('Failed to read clipboard items:', error);
+			}
 
 			for (const item of clipboardItems) {
 				// Check for known image types
@@ -636,7 +645,7 @@
 					{
 						users: userSuggestions,
 						apps: $config?.features?.enable_apps ?? false,
-						models: $models,
+						models: $baseModels,
 						channels: channelSuggestions ? $channels : []
 					}
 				);

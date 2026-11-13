@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolveToolApprovalMode } from '$lib/utils/toolPermissions';
 	import type { TerminalContext } from '$lib/types';
 	import {
 		estimateTokens,
@@ -19,6 +20,7 @@
 	import { get, writable, type Unsubscriber, type Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
 	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { getModels } from '$lib/apis';
 	import equal from 'fast-deep-equal';
 
 	import {
@@ -95,6 +97,7 @@
 	import {
 		applyResponseStreamEvent,
 		getOutputText,
+		getPendingAskUserFromMessage,
 		setOutputText
 	} from './Messages/structuredOutput';
 
@@ -114,7 +117,7 @@
 		updateChatParams,
 		updateChatFolderIdById
 	} from '$lib/apis/chats';
-	import type { FilesystemFile } from '$lib/apis/terminal';
+	import { setCwd, type FilesystemFile } from '$lib/apis/terminal';
 	import { generateOpenAIChatCompletion, getErrorMessage } from '$lib/apis/openai';
 	import { processUrl, processWebSearch } from '$lib/apis/retrieval';
 	import {
@@ -623,9 +626,7 @@
 	$: canClone = isShared && ($user?.role === 'admin' || ($user?.permissions?.chat?.import ?? true));
 	$: sideChatAllowed =
 		$user?.role === 'admin' ||
-		($user?.role === 'user' &&
-			($user.permissions?.chat?.temporary ?? true) &&
-			($user.permissions?.chat?.side_chat ?? false));
+		($user?.role === 'user' && ($user.permissions?.chat?.side_chat ?? false));
 	let cloning = false;
 
 	const cloneSharedChat = async () => {
@@ -700,7 +701,13 @@
 	let files: any[] = [];
 	let terminalContext: TerminalContext | null = null;
 	const askFile = async (instruction: string, file: FilesystemFile) => {
+		if (selectedModels.includes('')) throw new Error($i18n.t('Model not selected'));
 		const attachments = [structuredClone(file)];
+		if (fullWidthTabs) {
+			terminalTabs?.focusMainChat();
+			await tick();
+			if (!$showCallOverlay) messageInput?.focus({ preventScroll: true });
+		}
 		const last = history.currentId ? history.messages[history.currentId] : null;
 		if (last?.role === 'assistant' && !last.done) {
 			chatRequestQueues.update((queues) => ({
@@ -710,7 +717,9 @@
 					{ id: uuidv4(), prompt: instruction, files: attachments }
 				]
 			}));
-		} else await submitPrompt(instruction, attachments);
+		} else if ((await getChatId(history, !!project, true)) !== null) {
+			await submitPrompt(instruction, attachments);
+		}
 	};
 
 	let params = {};
@@ -720,13 +729,16 @@
 	let currentDraftKey = '';
 
 	// Chat parameters own the approval mode; chats without an override use the user default.
-	$: toolApprovalMode =
-		(params?.tool_approval_mode ?? $settings?.params?.tool_approval_mode) === 'ask'
-			? 'ask'
-			: 'full';
+	$: toolApprovalMode = resolveToolApprovalMode(
+		params?.tool_approval_mode ?? $settings?.params?.tool_approval_mode,
+		$config?.features?.enable_tool_permissions_auto ?? false
+	);
 
 	const handleToolApprovalModeChange = async (mode: string) => {
-		const tool_approval_mode = mode === 'ask' ? 'ask' : 'full';
+		const tool_approval_mode = resolveToolApprovalMode(
+			mode,
+			$config?.features?.enable_tool_permissions_auto ?? false
+		);
 		browserApprovalMode = tool_approval_mode;
 		params = {
 			...params,
@@ -794,41 +806,6 @@
 				break;
 			}
 		}
-	};
-
-	const parseToolArguments = (args) => {
-		if (!args) {
-			return {};
-		}
-		let value = args;
-		while (typeof value === 'string') {
-			try {
-				value = JSON.parse(value);
-			} catch {
-				break;
-			}
-		}
-		return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {};
-	};
-
-	const getPendingAskUserFromMessage = (message) => {
-		if (message?.role !== 'assistant' || !Array.isArray(message.output)) {
-			return null;
-		}
-
-		const call = message.output.find(
-			(item) =>
-				item?.type === 'function_call' &&
-				item?.name === 'ask_user' &&
-				item?.status === 'pending' &&
-				(item?.call_id || item?.id)
-		);
-
-		if (call) {
-			return { message, call, args: parseToolArguments(call.arguments) };
-		}
-
-		return null;
 	};
 
 	const findPendingAskUser = (chatHistory) => {
@@ -1114,6 +1091,8 @@
 	};
 	onDestroy(() => chatLoadController.abort());
 	const navigateHandler = async () => {
+		loading = true;
+		terminalTabs?.prepareChatSwitch();
 		const signal = startChatLoad();
 		modelDefaults = null;
 		cancelBrowserInteractions();
@@ -1259,6 +1238,7 @@
 		lastTerminalSkillSelector = $selectedTerminalId;
 	}
 
+
 	let defaultsModelIds: string[] = [];
 	let modelDefaults: Record<string, any> | null = null;
 	let settingDefaults: Promise<void> | null = null;
@@ -1310,7 +1290,10 @@
 					codeInterpreterEnabled,
 					terminalId: $selectedTerminalId
 				};
-				modelDefaults ??= structuredClone(defaults);
+				if (!modelDefaults) {
+					modelDefaults = structuredClone(defaults);
+					defaultsModelIds = modelIds;
+				}
 				for (const key of Object.keys(defaults)) {
 					const previous = modelDefaults[key];
 					if (Array.isArray(previous)) {
@@ -1323,7 +1306,10 @@
 						defaults[key] = [
 							...new Set([...defaults[key].filter((id: string) => !removed.includes(id)), ...added])
 						];
-					} else if (current[key] !== previous) {
+					} else if (
+						(key !== 'terminalId' || equal(modelIds, defaultsModelIds)) &&
+						current[key] !== previous
+					) {
 						defaults[key] = current[key];
 					} else {
 						modelDefaults[key] = defaults[key];
@@ -1371,7 +1357,14 @@
 	};
 
 	let revealedSearchMessage = '';
-	$: if (!embedded && !loading && messagesRef && chat && chat.id === $page.params.id) {
+	$: if (
+		!embedded &&
+		!loading &&
+		messagesRef &&
+		chat &&
+		chat.id === $page.params.id &&
+		(!fullWidthTabs || mainChatActive)
+	) {
 		const target = $page.url.searchParams.get('message');
 		const key = `${chat.id}:${target}`;
 		if (target && history.messages[target] && key !== revealedSearchMessage) {
@@ -2082,7 +2075,10 @@
 
 		$audioQueue?.destroy();
 
-		const audioQueueInstance = new AudioQueue(document.getElementById('audioElement'));
+		const audioQueueInstance = new AudioQueue(
+			document.getElementById('audioElement'),
+			() => $settings.responseAutoPlayback ?? false
+		);
 		audioQueue.set(audioQueueInstance);
 
 		// Restore direct terminal enabled states based on persisted selectedTerminalId
@@ -2585,6 +2581,7 @@
 				return {
 					chatId: isTemporaryChatId($chatId) ? undefined : $chatId || undefined,
 					modelId: model && !('direct' in model && model.direct) ? model.id : '',
+					terminalId: $selectedTerminalId || undefined,
 					voiceModel: $config?.audio?.realtime?.model,
 					voice: model?.info?.meta?.voice?.voice || $config?.audio?.realtime?.voice,
 					messages: createMessagesList(history, history.currentId).map((message) => {
@@ -2796,6 +2793,7 @@
 	};
 
 	const initNewChat = async () => {
+		terminalTabs?.prepareChatSwitch();
 		loading = true;
 		if (!embedded && $showTabs) showTabs.set(false);
 		const signal = startChatLoad();
@@ -2979,6 +2977,7 @@
 			currentId: null
 		};
 
+
 		chatFiles = [];
 		chatVariables = {};
 		taskIds = null;
@@ -3040,31 +3039,19 @@
 		if (chatInputPrompt !== null) messageInput?.setText(chatInputPrompt);
 		if (modelSearch) await openModelSelectorWithSearch(modelSearch);
 
-		// Consume one-shot desktop event (e.g. Spotlight query, call shortcut)
 		if ($desktopEvent) {
 			const event = $desktopEvent;
 			desktopEvent.set(null);
-
 			if (event.type === 'call') {
 				openCallOverlay();
 			} else if (event.type === 'query') {
 				const query = event.data?.query;
 				const eventFiles = event.data?.files;
-
-				// Attach screenshot images from desktop (e.g. Spotlight region capture)
 				if (eventFiles?.length) {
 					for (const ef of eventFiles) {
-						files = [
-							...files,
-							{
-								type: 'image',
-								url: ef.dataUrl,
-								name: ef.name
-							}
-						];
+						files = [...files, { type: 'image', url: ef.dataUrl, name: ef.name }];
 					}
 				}
-
 				if (query) {
 					messageInput?.setTextHandler(query, () => submitHandler(prompt));
 				} else if (eventFiles?.length) {
@@ -3079,7 +3066,8 @@
 		}
 
 		selectedModels = selectedModels.map((modelId) =>
-			$models.map((m) => m.id).includes(modelId) ? modelId : ''
+			$models.some((model) => model.id === modelId &&
+				(!readProject(activeFolder) || isProjectModelCompatible(model))) ? modelId : ''
 		);
 
 		await tick();
@@ -3087,6 +3075,7 @@
 	};
 
 	const loadChat = async (signal = startChatLoad()) => {
+		if (chatIdProp && chatIdProp !== $chatId) terminalTabs?.prepareChatSwitch();
 		if (chatIdProp && chatIdProp !== $chatId) {
 			terminalContext = null;
 			history = { messages: {}, currentId: null };
@@ -3165,7 +3154,8 @@
 				// An empty model list is not evidence that the chat's models are gone.
 				if ($models.length > 0) {
 					selectedModels = selectedModels.filter((modelId) =>
-						$models.map((m) => m.id).includes(modelId)
+						$models.some((model) => model.id === modelId &&
+							(!readProject(activeFolder) || isProjectModelCompatible(model)))
 					);
 				}
 
@@ -3291,7 +3281,6 @@
 					loading = false;
 					await tick();
 					if (signal.aborted) return;
-					if (!$page.url.searchParams.has('message')) scrollToBottom();
 					messageInput?.focus({ preventScroll: true });
 				}
 				return true;
@@ -3343,6 +3332,15 @@
 			});
 		}
 	};
+
+	$: if (
+		!loading &&
+		(!fullWidthTabs || mainChatActive) &&
+		autoScroll &&
+		!$page.url.searchParams.has('message')
+	) {
+		scrollToBottom();
+	}
 
 	const scrollToTop = async () => {
 		await messagesRef?.scrollToTop();
@@ -3789,6 +3787,7 @@
 
 		if (done) {
 			message.done = true;
+			message.meta = { ...message.meta, response_ended_at: Date.now() / 1000 };
 			if ($contextCompactions[message.id] === 'in_progress') clearContextCompaction(message.id);
 			if (shared) return;
 			if (message.error) {
@@ -3851,6 +3850,7 @@
 		inputFiles: any[],
 		bridgeRequest: { userMessageId: string; modelId: string } | null = null
 	) => {
+		if (selectedModels.includes('')) throw new Error($i18n.t('Model not selected'));
 		const _files = structuredClone(inputFiles);
 
 		chatFiles.push(
@@ -4076,8 +4076,11 @@
 	let terminalTabs: ChatTabs;
 	let fullWidthTabs = false;
 	let mainChatActive = false;
+	let mainChatStyle = '';
+	let mainChatGroupId = '';
 	let tabTitleEditor: import('svelte').Snippet | undefined;
 	let tabActions: import('svelte').Snippet | undefined;
+	let tabBarActions: import('svelte').Snippet | undefined;
 
 	let chatIdRequest: {
 		history: typeof history;
@@ -4209,7 +4212,7 @@
 			return { status: 'rejected' };
 
 		const _selectedModels = selectedModels.map((modelId) =>
-			$models.map((m) => m.id).includes(modelId) ? modelId : ''
+			modelId.startsWith('agent:') || $models.map((m) => m.id).includes(modelId) ? modelId : ''
 		);
 
 		if (!equal(selectedModels, _selectedModels)) {
@@ -5014,6 +5017,10 @@
 	};
 
 	const submitMessage = async (parentId, prompt) => {
+		if (selectedModels.includes('')) {
+			toast.error($i18n.t('Model not selected'));
+			return;
+		}
 		let userPrompt = prompt;
 		let userMessageId = uuidv4();
 
@@ -5693,6 +5700,10 @@
 		? '  md:max-w-[calc(100%-var(--sidebar-width))]'
 		: ' '} w-full max-w-full min-w-0 flex flex-col"
 	id={chatContainerId}
+	role="presentation"
+	on:dragover|capture={(event) => terminalTabs?.dragOverChat(event)}
+	on:drop|capture={(event) => terminalTabs?.dropChat(event)}
+	on:dragleave={(event) => terminalTabs?.leaveChatDrop(event)}
 >
 	<div in:fade={{ duration: 50 }} class="w-full h-full flex flex-col">
 		{#if backgroundImage}
@@ -5705,14 +5716,15 @@
 			></div>
 		{/if}
 
-		<div
-			class="w-full h-full min-h-0 {fullWidthTabs
-				? 'grid grid-cols-1 grid-rows-[auto_minmax(0,1fr)_auto]'
-				: 'flex'}"
-		>
+		<div class="relative w-full h-full min-h-0 flex">
 			<div
 				class="h-full flex relative max-w-full min-w-0 min-h-0 flex-1 flex-col col-start-1 row-start-2"
 				class:hidden={fullWidthTabs && !mainChatActive}
+				style={fullWidthTabs ? mainChatStyle : undefined}
+				data-main-chat-pane
+				data-panel-group={fullWidthTabs ? mainChatGroupId : undefined}
+				on:focusin={() => fullWidthTabs && terminalTabs?.focusMainChat()}
+				on:pointerdown={() => fullWidthTabs && terminalTabs?.focusMainChat()}
 				id={fullWidthTabs ? 'chat-panel-main-chat-view' : undefined}
 				role={fullWidthTabs ? 'tabpanel' : undefined}
 				aria-labelledby={fullWidthTabs ? 'chat-panel-main-chat' : undefined}
@@ -5755,6 +5767,7 @@
 							tabbed={fullWidthTabs}
 							bind:tabTitleEditor
 							bind:tabActions
+							bind:tabBarActions
 							{liveParticipants}
 							bind:this={navbarElement}
 							readOnly={isShared}
@@ -5893,7 +5906,7 @@
 									class=" pb-2 {dragged ? 'z-0' : 'z-10'}"
 								>
 									<MessageInput
-										{terminalContext}
+										bind:terminalContext
 										{typingUsers}
 										on:typing={(event) => emitTyping(event.detail)}
 										callActive={!!(bridge?.connected || bridge?.connecting)}
@@ -5994,7 +6007,7 @@
 								{/if}
 								<div id={embedded ? messageInputDropzoneId : undefined} class="pb-2 z-10">
 									<MessageInput
-										{terminalContext}
+										bind:terminalContext
 										{typingUsers}
 										on:typing={(event) => emitTyping(event.detail)}
 										callActive={!!(bridge?.connected || bridge?.connecting)}
@@ -6065,7 +6078,7 @@
 							<div class="flex items-center h-full">
 								<Placeholder
 									chatId={$chatId}
-									{terminalContext}
+									bind:terminalContext
 									callActive={!!(bridge?.connected || bridge?.connecting)}
 									callEnabled={!isShared}
 									bind:selectedModelIdx
@@ -6126,16 +6139,21 @@
 
 			{#if !embedded}
 				<ChatTabs
+					chatLoading={loading}
 					bind:fullWidth={fullWidthTabs}
 					bind:mainChatActive
+					bind:mainChatStyle
+					bind:mainChatGroupId
 					title={$chatTitle || $i18n.t('New Chat')}
 					tabTitleEditor={loading ? undefined : tabTitleEditor}
 					tabActions={loading ? undefined : tabActions}
+					tabBarActions={loading ? undefined : tabBarActions}
 					bind:terminalContext
 					bind:history
 					bind:files
 					chatId={$chatId}
 					bind:this={terminalTabs}
+					folderId={chat ? (chat.folder_id ?? null) : ($selectedFolder?.id ?? null)}
 					chatUser={chatOwner}
 					modelId={selectedModelIds?.at(0) ?? null}
 					canSideChat={!project && sideChatAllowed && selectedModels.length === 1 && !!selectedModelIds[0]}
