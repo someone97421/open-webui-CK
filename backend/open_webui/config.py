@@ -1586,6 +1586,7 @@ ELEVENLABS_API_BASE_URL = os.getenv('ELEVENLABS_API_BASE_URL', 'https://api.elev
 
 AUDIO_STT_ENABLED = os.getenv('AUDIO_STT_ENABLED', 'True').lower() == 'true'
 AUDIO_CALL_ENABLED = os.getenv('AUDIO_CALL_ENABLED', 'True').lower() == 'true'
+AUDIO_VOICE_NOTE_ENABLED = os.getenv('AUDIO_VOICE_NOTE_ENABLED', 'False').lower() == 'true'
 
 AUDIO_STT_OPENAI_API_BASE_URL = os.getenv('AUDIO_STT_OPENAI_API_BASE_URL', OPENAI_API_BASE_URL)
 
@@ -3200,6 +3201,7 @@ DEFAULT_CONFIG = {
     'images.edit.comfyui.nodes': IMAGES_EDIT_COMFYUI_WORKFLOW_NODES,
     'audio.stt.enabled': AUDIO_STT_ENABLED,
     'audio.call.enabled': AUDIO_CALL_ENABLED,
+    'audio.voice_note.enabled': AUDIO_VOICE_NOTE_ENABLED,
     'audio.stt.whisper_model': WHISPER_MODEL,
     'audio.stt.deepgram.api_key': DEEPGRAM_API_KEY,
     'audio.stt.openai.api_base_url': AUDIO_STT_OPENAI_API_BASE_URL,

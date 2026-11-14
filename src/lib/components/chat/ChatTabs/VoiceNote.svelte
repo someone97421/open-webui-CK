@@ -73,6 +73,13 @@
 	let frame = 0;
 	let timer: ReturnType<typeof setInterval>;
 	let disposed = false;
+	let recordingDisabled = false;
+	$: if ($config?.audio?.voice_note?.enabled !== true) {
+		recordingDisabled = true;
+		stop();
+		releaseMicrophone();
+		initializing = false;
+	}
 	let player: HTMLAudioElement;
 	let playing = false;
 	let audioUrl = '';
@@ -108,6 +115,10 @@
 		}
 	};
 	const start = async () => {
+		if (disposed || recordingDisabled || $config?.audio?.voice_note?.enabled !== true) {
+			initializing = false;
+			return;
+		}
 		error = '';
 		player?.pause();
 		playing = false;
@@ -119,9 +130,9 @@
 				directory = cwd.cwd ?? cwd.home ?? cwd.root?.path;
 				if (!directory) throw new Error($i18n.t('Could not load the recording folder.'));
 			}
-			if (disposed) return;
+			if (disposed || recordingDisabled || $config?.audio?.voice_note?.enabled !== true) return;
 			stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			if (disposed) {
+			if (disposed || recordingDisabled || $config?.audio?.voice_note?.enabled !== true) {
 				releaseMicrophone();
 				return;
 			}
@@ -359,6 +370,7 @@
 			close();
 		} else if (
 			panel?.contains(event.target as Node) &&
+			$config?.audio?.voice_note?.enabled === true &&
 			$settings?.keyboardShortcuts !== false &&
 			matchKeybinding(event) === Shortcut.VOICE_NOTE
 		) {
@@ -569,7 +581,7 @@
 			{:else}
 				<div class="flex justify-end gap-1.5">
 					<button class={buttonClass} on:click={close}>{$i18n.t('Cancel')}</button>
-					<button class={primaryButtonClass} on:click={start}>{$i18n.t('Record')}</button>
+					<button class={primaryButtonClass} disabled={recordingDisabled || $config?.audio?.voice_note?.enabled !== true} on:click={start}>{$i18n.t('Record')}</button>
 				</div>
 			{/if}
 			{#if error}<p role="alert" class="mt-3 text-xs text-red-500">{error}</p>{/if}

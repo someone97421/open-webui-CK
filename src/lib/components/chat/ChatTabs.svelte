@@ -25,6 +25,7 @@
 	import {
 		artifactContents,
 		config,
+		socket,
 		embed,
 		temporaryChatEnabled,
 		terminalServers,
@@ -43,6 +44,7 @@
 	} from '$lib/stores';
 
 	import { commentsRequest, resourceQuery } from '$lib/apis/comments';
+	import { getBackendConfig } from '$lib/apis';
 	import CommentsPanel, {
 		type CommentsRequest
 	} from '$lib/components/comments/CommentsPanel.svelte';
@@ -380,9 +382,11 @@
 		chatId: string | null;
 		directory?: string;
 	} | null = null;
-	$: canVoiceNote = terminalFilesAvailable && !!$user;
+	$: voiceNoteEnabled = $config?.audio?.voice_note?.enabled === true;
+	$: canVoiceNote = voiceNoteEnabled && terminalFilesAvailable && !!$user;
 	$: canTranscribeVoiceNote = $user?.role === 'admin' || ($user?.permissions?.chat?.stt ?? true);
 	const openVoiceNote = () => {
+		if (!voiceNoteEnabled) return;
 		if (voiceNoteTarget) {
 			voiceNote?.finishRecording();
 			return;
@@ -397,6 +401,36 @@
 					: undefined
 		};
 	};
+
+	onMount(() => {
+		const socketInstance = $socket;
+		let refreshVersion = 0;
+		const updateVoiceNoteConfig = ({ enabled }: { enabled: boolean }) => {
+			++refreshVersion;
+			config.update((value) => value?.audio ? {
+				...value,
+				audio: { ...value.audio, voice_note: { enabled: enabled === true } }
+			} : value);
+		};
+		const refreshVoiceNoteConfig = async () => {
+			const version = ++refreshVersion;
+			try {
+				const value = await getBackendConfig(localStorage.token);
+				if (!disposed && version === refreshVersion)
+					updateVoiceNoteConfig({ enabled: value?.audio?.voice_note?.enabled === true });
+			} catch (error) {
+				console.error('Unable to refresh voice note settings', error);
+			}
+		};
+		socketInstance?.on('audio:voice-note:updated', updateVoiceNoteConfig);
+		socketInstance?.on('connect', refreshVoiceNoteConfig);
+		void refreshVoiceNoteConfig();
+		return () => {
+			++refreshVersion;
+			socketInstance?.off('audio:voice-note:updated', updateVoiceNoteConfig);
+			socketInstance?.off('connect', refreshVoiceNoteConfig);
+		};
+	});
 	$: if (!terminalFilesAvailable) showQuickOpen = false;
 	let terminalEnabled = false;
 	let desktopEnabled = false;
@@ -1142,7 +1176,7 @@
 		let action: (() => void) | undefined;
 		switch (shortcut) {
 			case Shortcut.VOICE_NOTE:
-				if (voiceNoteTarget || canVoiceNote) action = openVoiceNote;
+				if (voiceNoteEnabled && (voiceNoteTarget || canVoiceNote)) action = openVoiceNote;
 				break;
 			case Shortcut.QUICK_OPEN:
 				if (terminalFilesAvailable && selectedConnection)

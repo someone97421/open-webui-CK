@@ -96,9 +96,11 @@
 						dirty: dirty || saving,
 						scrollTop: viewerRoot?.scrollTop ?? 0
 					};
+		const directory = savedPathLoaded ? savedPath : (initialView?.directory ?? initialDirectory ?? undefined);
 		return {
 			...view,
-			isHome: homeDirectory !== null && asDirectoryPath(view.directory) === homeDirectory
+			directory,
+			isHome: typeof directory === 'string' && homeDirectory !== null && asDirectoryPath(directory) === homeDirectory
 		};
 	};
 	const restoreView = async () => {
@@ -116,7 +118,8 @@
 					: { ...view.preview, text: fileContent ?? '', editor: undefined }
 			);
 		}
-		for (const path of view.expanded ?? []) {
+		const expanded = view.directory && asDirectoryPath(view.directory) === currentPath ? (view.expanded ?? []) : [];
+		for (const path of expanded) {
 			if (disposed) return;
 			if (!expandedDirs.has(path)) await toggleExpand(path);
 		}
@@ -261,8 +264,15 @@
 	};
 	export const requestClose = () => protectBuffer();
 	export const hasUnsavedChanges = () => dirty || saving;
-	export const browseDirectory = (path: string) => loadDir(path);
-	export const refreshDirectory = () => !selectedFile && refreshBrowser();
+	let pendingDirectory: string | null = null;
+	export const browseDirectory = (path: string) => {
+		if (!directoryReady) {
+			pendingDirectory = path;
+			return;
+		}
+		return loadDir(path);
+	};
+	export const refreshDirectory = () => directoryReady && !selectedFile && refreshBrowser();
 	export const revealPage = (page: number | null) => {
 		documentTargetPage = normalizeDocumentTargetPage(page);
 	};
@@ -473,12 +483,12 @@
 		}, delay);
 	};
 	const directoryRequest = async <T,>(
-		terminal: { url: string; key: string }, session: string | null, path: string
+		terminal: { url: string; key: string }, session: string | null, path: string, timeoutMs = 20000
 	): Promise<T> => {
 		directoryController?.abort();
 		const controller = new AbortController();
 		directoryController = controller;
-		const timeout = setTimeout(() => controller.abort(), 20000);
+		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
 			return await terminalRequest<T>({
 				selector: effectiveTerminalId ?? '',
@@ -487,7 +497,7 @@
 			}, session, path, { signal: controller.signal });
 		} catch (cause) {
 			if (controller.signal.aborted && directoryController === controller && !disposed)
-				throw new TerminalRequestError('工作空间响应超时（20 秒）', 408);
+				throw new TerminalRequestError(`工作空间响应超时（${timeoutMs / 1000} 秒）`, 408);
 			throw cause;
 		} finally {
 			clearTimeout(timeout);
@@ -501,7 +511,7 @@
 			workspacePreparation = null;
 			await prepareWorkspace(chatId, effectiveTerminalId, $terminalServers, $settings);
 		} else if (selectedTerminal) {
-			await initializeDirectory(selectedTerminal, directoryReady ? currentPath : undefined);
+			await initializeDirectory(selectedTerminal, savedPathLoaded ? savedPath : undefined);
 		}
 	};
 
@@ -879,18 +889,24 @@
 	let workspacePreparation: {
 		id: string | null;
 		selector: string | null;
-		servers: any;
-		settingsValue: any;
+		connectionKey: string;
 		cancel: () => void;
 	} | null = null;
 	const prepareWorkspace = async (id, selector, servers, settingsValue) => {
 		if (!ensureTerminalChat || disposed) return;
+		const server = selector ? servers?.find((server) => server.id === selector) : servers?.[0];
+		const direct = settingsValue?.terminalServers?.find((server) => server.url === selector);
+		const connection = server ?? direct;
+		if (!connection || server?.contexts?.chat === false) return;
+		const connectionKey = JSON.stringify([
+			connection.url, connection.key, connection.contexts, connection.features?.workspace_isolation
+		]);
 		if (workspacePreparation?.id === id && workspacePreparation.selector === selector &&
-			workspacePreparation.servers === servers && workspacePreparation.settingsValue === settingsValue) return;
+			workspacePreparation.connectionKey === connectionKey) return;
 		workspacePreparation?.cancel();
 		let timeout: ReturnType<typeof setTimeout> | undefined;
 		let cancelWait: ((cause: unknown) => void) | null = null;
-		const preparation = { id, selector, servers, settingsValue, cancel: () => {
+		const preparation = { id, selector, connectionKey, cancel: () => {
 			if (timeout) clearTimeout(timeout);
 			cancelWait?.(new DOMException('工作空间已切换', 'AbortError'));
 		} };
@@ -909,10 +925,10 @@
 				})
 			]);
 			if (!preparedId) throw new Error('未能准备工作空间会话');
+			preparation.id = preparedId;
 			await tick();
 			if (disposed || workspacePreparation !== preparation || !preparedId ||
 				effectiveTerminalId !== selector || (chatId && chatId !== preparedId)) return;
-			preparation.id = preparedId;
 			chatId = preparedId;
 			workspaceReadyTerminalId = selector;
 			workspaceReadyId = preparedId;
@@ -1010,7 +1026,7 @@
 		}
 
 		if (chatChanged || terminalChanged || !terminal) {
-			clearWorkspaceRetry();
+			if (chatChanged || terminalChanged) clearWorkspaceRetry();
 			directoryController?.abort();
 			directoryController = null;
 			directoryReady = false;
@@ -1310,7 +1326,7 @@
 	// Directory operations
 	const loadDir = async (
 		path: string,
-		options: { preserveTree?: boolean; restoreTree?: boolean; syncCwd?: boolean } = {}
+		options: { preserveTree?: boolean; restoreTree?: boolean; syncCwd?: boolean; fallbackPath?: string } = {}
 	) => {
 		if (disposed) return;
 		if (!(await protectBuffer())) return;
@@ -1319,7 +1335,7 @@
 			session = chatId;
 		const terminal = selectedTerminal;
 		if (!terminal) return;
-		const directory = clampToFileRoot(path);
+		let directory = clampToFileRoot(path);
 		if (options.restoreTree) {
 			restoreTreeState(directory);
 		} else if (!options.preserveTree && directory !== currentPath) {
@@ -1337,23 +1353,37 @@
 		selectedFileWritable = true;
 		clearFilePreview();
 		clearSelection();
-		currentPath = directory;
-		onViewChange?.(captureView());
-		savedPath = directory;
-		savedPathLoaded = true;
-		pushNavHistory(directory);
 
 		let result: TerminalFileList | null = null;
 		let failure: unknown = new Error('目录加载失败，请检查 Terminal 连接');
-		try {
-			result = await directoryRequest<TerminalFileList>(
-				terminal, session, `/files/list?directory=${encodeURIComponent(directory)}`
+		let usedFallback = false;
+		const readDirectory = async (target: string) => {
+			const result = await directoryRequest<TerminalFileList>(
+				terminal, session, `/files/list?directory=${encodeURIComponent(target)}`
 			);
 			if (!Array.isArray(result?.entries))
 				throw new TerminalRequestError('Terminal 返回了无效的文件列表', 502);
+			return result;
+		};
+		try {
+			result = await readDirectory(directory);
 		} catch (cause) {
 			result = null;
 			failure = cause;
+			if (!disposed && generation === loadGeneration && selector === effectiveTerminalId &&
+				session === chatId && options.fallbackPath && cause instanceof TerminalRequestError &&
+				(cause.status === 403 || cause.status === 404)) {
+				const fallback = clampToFileRoot(options.fallbackPath);
+				if (fallback !== directory) {
+					try {
+						result = await readDirectory(fallback);
+						directory = fallback;
+						usedFallback = true;
+					} catch (fallbackCause) {
+						failure = fallbackCause;
+					}
+				}
+			}
 		}
 		if (disposed || generation !== loadGeneration || selector !== effectiveTerminalId || session !== chatId)
 			return;
@@ -1364,13 +1394,18 @@
 			scheduleWorkspaceRetry(failure);
 			entries = [];
 		} else {
+			if (usedFallback) resetTreeState();
 			clearWorkspaceRetry();
 			savedPath = directory;
+			savedPathLoaded = true;
+			currentPath = directory;
+			pushNavHistory(directory);
 			terminalContext = { terminalId: selector, currentDirectory: directory };
 			currentWritable = result.writable !== false;
 			entries = normalizeEntries(result.entries);
 			treeCache = new Map(treeCache).set(directory, entries);
 			saveTreeState();
+			onViewChange?.(captureView());
 		}
 		return result !== null;
 	};
@@ -1398,6 +1433,10 @@
 	};
 
 	const refreshBrowser = async () => {
+		if (!savedPathLoaded) {
+			await retryWorkspace();
+			return;
+		}
 		await loadDir(currentPath, { preserveTree: true, syncCwd: false });
 		await refreshExpandedDirs();
 	};
@@ -2412,23 +2451,23 @@
 		loadingStage = '正在连接工作空间';
 		error = null;
 		try {
-			const serverCwd = await directoryRequest<TerminalCwd>(terminal, session, '/files/cwd');
+			const serverCwd = await directoryRequest<TerminalCwd>(terminal, session, '/files/cwd', 60000);
 			if (!current()) return;
 			if (!serverCwd?.cwd && !serverCwd?.root?.path && !serverCwd?.home)
 				throw new TerminalRequestError('Terminal 未返回工作空间目录', 502);
 			const serverPath = applyCwd(serverCwd);
-			savedPath = clampToFileRoot(
-				directory ?? initialView?.directory ?? initialDirectory ?? folderDirectory ??
+			if (!savedPathLoaded) currentPath = serverPath;
+			const targetDirectory = clampToFileRoot(
+				pendingDirectory ?? directory ?? initialView?.directory ?? initialDirectory ?? folderDirectory ??
 				(terminalContext?.terminalId === selector ? terminalContext.currentDirectory : serverPath)
 			);
-			directoryReady = true;
 			if (initialFile) {
 				const file = initialFile;
 				const path = normalizePath(file.path);
 				const slash = path.lastIndexOf('/');
-				if (!(await loadDir(slash > 0 ? path.slice(0, slash + 1) : '/', { syncCwd: false }))) return;
-				if (disposed || loadGeneration !== generation + 1 || selector !== effectiveTerminalId ||
-					session !== chatId || !selectedTerminal) return;
+				const fileDir = clampToFileRoot(slash > 0 ? path.slice(0, slash + 1) : '/');
+				if (!(await loadDir(fileDir, { syncCwd: false, fallbackPath: serverPath }))) return;
+				if (disposed || selector !== effectiveTerminalId || session !== chatId || !selectedTerminal) return;
 				await openEntry(
 					entries.find((entry) => entry.name === path.slice(slash + 1)) ?? {
 						name: path.slice(slash + 1), type: 'file', writable: currentWritable
@@ -2436,9 +2475,22 @@
 					{ page: file.page }
 				);
 			} else {
-				await loadDir(directory ?? initialDirectory ?? savedPath, { restoreTree: true, syncCwd: false });
+				const loaded = await loadDir(targetDirectory, {
+					restoreTree: true,
+					syncCwd: false,
+					fallbackPath: pendingDirectory || initialView?.dirty || initialView?.preview?.dirty ? undefined : serverPath
+				});
+				if (!loaded) return;
 			}
-			if (!disposed && selector === effectiveTerminalId && session === chatId) await restoreView();
+			if (!disposed && selector === effectiveTerminalId && session === chatId) {
+				await restoreView();
+				if (disposed || selector !== effectiveTerminalId || session !== chatId) return;
+				directoryReady = true;
+				onViewChange?.(captureView());
+				const pending = pendingDirectory;
+				pendingDirectory = null;
+				if (pending && asDirectoryPath(pending) !== currentPath) await loadDir(pending);
+			}
 		} catch (cause) {
 			if (!current()) return;
 			loading = false;
@@ -2734,7 +2786,7 @@
 				showGitDiff = !showGitDiff;
 				fileAsk = null;
 			}}
-			breadcrumbs={buildBreadcrumbs(currentPath)}
+			breadcrumbs={savedPathLoaded || fileRoot ? buildBreadcrumbs(currentPath) : []}
 			{selectedFile}
 			fileSize={openedFile?.size ?? pendingFile?.size}
 			{loading}

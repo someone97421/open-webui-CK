@@ -4536,6 +4536,7 @@
 	"Voice mode": "",
 	"Voice Model": "",
 	"Voice Note": "Voice Note",
+	"Enable voice notes for all users. Disabling stops recording and keeps existing audio available to save or download.": "Enable voice notes for all users. Disabling stops recording and keeps existing audio available to save or download.",
 	"Volume": "",
 	"VRM 0.x or 1.0 · 25 MiB max · Embedded textures. Upload a character you have permission to use.": "",
 	"VRMA 1.0 · 10 MiB max · 60 seconds max. Body motion only, played in place. Mouth, blinking and gaze remain automatic.": "",

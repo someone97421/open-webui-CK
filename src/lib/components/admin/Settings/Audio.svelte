@@ -53,6 +53,7 @@
 
 let CALL_ENABLED = true;
 let STT_ENABLED = true;
+	let VOICE_NOTE_ENABLED = false;
 
 	// Audio
 	let TTS_OPENAI_API_BASE_URL = '';
@@ -187,6 +188,9 @@ let STT_ENABLED = true;
 			call: {
 				ENABLED: CALL_ENABLED
 			},
+			voice_note: {
+				ENABLED: VOICE_NOTE_ENABLED
+			},
 			tts: {
 				OPENAI_API_BASE_URL: TTS_OPENAI_API_BASE_URL,
 				OPENAI_API_KEY: TTS_OPENAI_API_KEY,
@@ -269,6 +273,7 @@ let STT_ENABLED = true;
 				? JSON.stringify(res.realtime.INPUT_PARAMS, null, 2)
 				: '';
 			CALL_ENABLED = res.call?.ENABLED ?? true;
+			VOICE_NOTE_ENABLED = res.voice_note?.ENABLED ?? false;
 			STT_ENABLED = res.stt.ENABLED ?? true;
 			STT_OPENAI_API_BASE_URL = res.stt.OPENAI_API_BASE_URL;
 			STT_OPENAI_API_KEY = res.stt.OPENAI_API_KEY;
@@ -313,7 +318,15 @@ let STT_ENABLED = true;
 	{/if}
 
 	<div class="flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
-		<AdminSettingSection title={$i18n.t('Voice calls')} first>
+		<AdminSettingSection title={$i18n.t('Voice Note')} first>
+			<AdminSettingRow label={$i18n.t('Voice Note')} let:labelId>
+				<span slot="label" title={$i18n.t('Enable voice notes for all users. Disabling stops recording and keeps existing audio available to save or download.')}>
+					{$i18n.t('Voice Note')}
+				</span>
+				<Switch bind:state={VOICE_NOTE_ENABLED} ariaLabelledbyId={labelId} />
+			</AdminSettingRow>
+		</AdminSettingSection>
+		<AdminSettingSection title={$i18n.t('Voice calls')}>
 			<AdminSettingRow
 				label={$i18n.t('settings.admin.audio.voiceMode.label')}
 				description={$i18n.t('settings.admin.audio.voiceMode.description')}

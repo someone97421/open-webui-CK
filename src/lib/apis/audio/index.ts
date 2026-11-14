@@ -44,11 +44,16 @@ export type CallConfig = {
 	ENABLED: boolean;
 };
 
+export type VoiceNoteConfig = {
+	ENABLED: boolean;
+};
+
 type AudioConfigForm = {
 	tts: Record<string, unknown>;
 	stt: Record<string, unknown>;
 	realtime?: Partial<RealtimeConfig>;
 	call?: Partial<CallConfig>;
+	voice_note?: Partial<VoiceNoteConfig>;
 };
 
 export const updateAudioConfig = async (token: string, payload: AudioConfigForm) => {

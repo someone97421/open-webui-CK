@@ -54,6 +54,7 @@ from open_webui.env import (
 from open_webui.events import EVENTS, publish_event
 from open_webui.models.config import Config
 from open_webui.routers.audio import realtime
+from open_webui.socket.main import sio
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import include_user_info_headers
@@ -114,6 +115,10 @@ REALTIME_CONFIG_KEYS = {
 
 CALL_CONFIG_KEYS = {
     'ENABLED': 'audio.call.enabled',
+}
+
+VOICE_NOTE_CONFIG_KEYS = {
+    'ENABLED': 'audio.voice_note.enabled',
 }
 
 STT_CONFIG_KEYS = {
@@ -283,6 +288,10 @@ class CallConfigForm(BaseModel):
     ENABLED: bool = True
 
 
+class VoiceNoteConfigForm(BaseModel):
+    ENABLED: bool = False
+
+
 class STTConfigForm(BaseModel):
     ENABLED: bool = True
     OPENAI_API_BASE_URL: str
@@ -322,6 +331,7 @@ class AudioConfigUpdateForm(BaseModel):
     stt: STTConfigForm
     realtime: Optional[RealtimeConfigForm] = None
     call: Optional[CallConfigForm] = None
+    voice_note: Optional[VoiceNoteConfigForm] = None
 
 
 @router.get('/config')
@@ -329,6 +339,7 @@ async def get_audio_config(request: Request, user=Depends(get_admin_user)):
     return {
         'realtime': await get_config_values(REALTIME_CONFIG_KEYS),
         'call': await get_config_values(CALL_CONFIG_KEYS),
+        'voice_note': await get_config_values(VOICE_NOTE_CONFIG_KEYS),
         'tts': await get_config_values(TTS_CONFIG_KEYS),
         'stt': await get_config_values(STT_CONFIG_KEYS),
     }
@@ -350,6 +361,11 @@ async def update_audio_config(request: Request, form_data: AudioConfigUpdateForm
                 else {}
             ),
             **(
+                config_updates(form_data.voice_note.model_dump(exclude_unset=True), VOICE_NOTE_CONFIG_KEYS)
+                if form_data.voice_note
+                else {}
+            ),
+            **(
                 config_updates(form_data.realtime.model_dump(exclude_unset=True), REALTIME_CONFIG_KEYS)
                 if form_data.realtime
                 else {}
@@ -358,6 +374,9 @@ async def update_audio_config(request: Request, form_data: AudioConfigUpdateForm
             **config_updates(form_data.stt.model_dump(exclude_unset=True), STT_CONFIG_KEYS),
         }
     )
+    if form_data.voice_note and 'ENABLED' in form_data.voice_note.model_fields_set:
+        enabled = await Config.get('audio.voice_note.enabled', False)
+        await sio.emit('audio:voice-note:updated', {'enabled': enabled})
 
     if form_data.stt.ENGINE == '' and not USE_SLIM:
         request.app.state.faster_whisper_model = await asyncio.to_thread(

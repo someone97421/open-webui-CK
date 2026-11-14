@@ -399,6 +399,7 @@ type Config = {
 	audio?: {
 		realtime?: { enabled: boolean; model: string; voice: string };
 		call?: { enabled: boolean };
+		voice_note?: { enabled: boolean };
 		stt: { enabled: boolean; engine: string };
 		tts: { engine: string; voice: string; split_on: string };
 	};

@@ -10,7 +10,7 @@
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	import { config, models, settings, user, terminalServers } from '$lib/stores';
-	import { getTerminalServers } from '$lib/apis/terminal';
+	import { getTerminalConfig, getTerminalServers } from '$lib/apis/terminal';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	import Switch from '$lib/components/common/Switch.svelte';
@@ -105,14 +105,23 @@
 				(t) => !t.id
 			);
 			const systemTerminals = await getTerminalServers(localStorage.token);
-			const systemEntries = systemTerminals.map((t) => ({
-				id: t.id,
-				url: `${WEBUI_API_BASE_URL}/terminals/${t.id}`,
-				name: t.name,
-				key: localStorage.token,
-				contexts: t.contexts ?? {},
-				config: t.config ?? {}
-			}));
+			const systemEntries = await Promise.all(
+				systemTerminals.map(async (t) => {
+					const url = `${WEBUI_API_BASE_URL}/terminals/${t.id}`;
+					return {
+						id: t.id,
+						url,
+						name: t.name,
+						key: localStorage.token,
+						contexts: t.contexts ?? {},
+						config: t.config ?? {},
+						features:
+							t.features ??
+							(await getTerminalConfig(url, localStorage.token).catch(() => null))?.features ??
+							{}
+					};
+				})
+			);
 			terminalServers.set([...existingDirectTerminals, ...systemEntries] as any);
 		}
 	};

@@ -15,7 +15,7 @@
 	$: if (!editing) index = selectedIndex < 0 ? 2 : selectedIndex;
 	$: currentValue = editing ? levels[index] : value || null;
 	$: label = currentValue === null ? $i18n.t('Default') : currentValue === 'none' || currentValue === 'disabled' || currentValue === 'off' ? 'off' : currentValue;
-	$: progress = selectedIndex < 0 && !editing ? 0 : (index / (levels.length - 1)) * 100;
+	$: progress = selectedIndex < 0 && !editing ? 0 : ((index + 0.5) / levels.length) * 100;
 	$: hint = $i18n.t('omit skips reasoning parameters; off disables reasoning; Default inherits your settings.');
 
 	const choose = (nextIndex: number) => {
@@ -25,7 +25,7 @@
 	};
 </script>
 
-<div class="space-y-2 px-2 pt-1.5 pb-2.5 text-xs">
+<div class="space-y-2 px-2 pt-1.5 pb-2.5 text-xs [--reasoning-thumb-size:1.25rem]">
 	<div class="flex items-center gap-2">
 		<Tooltip content={hint} allowHTML={false}>
 			<span class="flex cursor-help items-center gap-1.5 text-gray-500 dark:text-gray-400">
@@ -51,9 +51,12 @@
 			class="relative flex h-6 items-center rounded-full bg-gray-100 [--reasoning-fill:var(--color-gray-300)] dark:bg-white/[0.07] dark:[--reasoning-fill:var(--color-gray-600)]"
 			style:background-image={`linear-gradient(to right, var(--reasoning-fill) ${progress}%, transparent ${progress}%)`}
 		>
-			<div class="pointer-events-none absolute inset-x-2.5 flex justify-between" aria-hidden="true">
+			<div class="pointer-events-none absolute inset-x-[6.25%] h-1" aria-hidden="true">
 				{#each levels as level, step}
-					<span class={`size-1 rounded-full ${step <= index && (selectedIndex >= 0 || editing) ? 'bg-gray-500/60 dark:bg-gray-300/60' : 'bg-gray-400/40 dark:bg-gray-500/50'}`}></span>
+					<span
+						class={`absolute size-1 -translate-x-1/2 rounded-full ${step <= index && (selectedIndex >= 0 || editing) ? 'bg-gray-500/60 dark:bg-gray-300/60' : 'bg-gray-400/40 dark:bg-gray-500/50'}`}
+						style:left={`${(step / (levels.length - 1)) * 100}%`}
+					></span>
 				{/each}
 			</div>
 			<input
@@ -64,7 +67,7 @@
 				value={index}
 				aria-label={$i18n.t('Reasoning level')}
 				aria-valuetext={label}
-				class="reasoning-slider relative h-6 w-full cursor-pointer appearance-none rounded-full bg-transparent outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400"
+				class="reasoning-slider absolute h-6 cursor-pointer appearance-none rounded-full bg-transparent outline-offset-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400"
 				on:input={(event) => {
 					editing = true;
 					index = Number(event.currentTarget.value);
@@ -80,12 +83,12 @@
 				}}
 			/>
 		</div>
-		<div class="grid grid-cols-8 gap-0.5">
+		<div class="grid grid-cols-8">
 			{#each levels as level, step}
 				<button
 					type="button"
 					aria-pressed={editing ? index === step : selectedIndex === step}
-					class={`rounded-sm py-1 text-center text-[0.5625rem] leading-3 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 ${((editing && index === step) || (!editing && selectedIndex === step)) ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300'}`}
+					class={`whitespace-nowrap rounded-sm py-1 text-center text-[0.5625rem] leading-3 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 ${((editing && index === step) || (!editing && selectedIndex === step)) ? 'font-medium text-gray-900 dark:text-gray-100' : 'text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300'}`}
 					on:click={() => choose(step)}
 				>
 					{level === null ? $i18n.t('Default') : level === 'none' ? 'off' : level}
@@ -96,18 +99,46 @@
 </div>
 
 <style>
+	.reasoning-slider {
+		left: calc(6.25% - var(--reasoning-thumb-size) / 2);
+		width: calc(87.5% + var(--reasoning-thumb-size));
+		margin: 0;
+		padding: 0;
+		border: 0;
+	}
+
+	.reasoning-slider::-webkit-slider-runnable-track {
+		height: 1.5rem;
+		border: 0;
+		background: transparent;
+	}
+
+	.reasoning-slider::-moz-range-track {
+		height: 1.5rem;
+		border: 0;
+		background: transparent;
+	}
+
+	.reasoning-slider::-moz-range-progress {
+		background: transparent;
+	}
+
 	.reasoning-slider::-webkit-slider-thumb {
 		appearance: none;
-		width: 1.25rem;
-		height: 1.25rem;
+		box-sizing: border-box;
+		width: var(--reasoning-thumb-size);
+		height: var(--reasoning-thumb-size);
+		margin-top: calc((1.5rem - var(--reasoning-thumb-size)) / 2);
 		border: 1px solid #0000000d;
 		border-radius: 50%;
 		background: white;
 		box-shadow: 0 1px 3px #0003;
 	}
+
 	.reasoning-slider::-moz-range-thumb {
-		width: 1.125rem;
-		height: 1.125rem;
+		box-sizing: border-box;
+		width: var(--reasoning-thumb-size);
+		height: var(--reasoning-thumb-size);
 		border: 1px solid #0000000d;
 		border-radius: 50%;
 		background: white;

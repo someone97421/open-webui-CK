@@ -2376,6 +2376,7 @@ async def get_app_config(request: Request):
         'code_execution.engine',
         'code_interpreter.engine',
         'audio.call.enabled',
+        'audio.voice_note.enabled',
         'audio.stt.enabled',
         'audio.realtime.enabled',
         'audio.realtime.model',
@@ -2523,6 +2524,9 @@ async def get_app_config(request: Request):
                     },
                     'call': {
                         'enabled': config.get('audio.call.enabled'),
+                    },
+                    'voice_note': {
+                        'enabled': config.get('audio.voice_note.enabled', False),
                     },
                     'stt': {
                         'enabled': config.get('audio.stt.enabled'),
