@@ -482,15 +482,15 @@
 			if (active && document.visibilityState === 'visible') void retryWorkspace(false);
 		}, delay);
 	};
-	const directoryRequest = async <T,>(
+	const directoryRequest = async (
 		terminal: { url: string; key: string }, session: string | null, path: string, timeoutMs = 20000
-	): Promise<T> => {
+	): Promise<unknown> => {
 		directoryController?.abort();
 		const controller = new AbortController();
 		directoryController = controller;
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
-			return await terminalRequest<T>({
+			return await terminalRequest({
 				selector: effectiveTerminalId ?? '',
 				baseUrl: terminal.url.replace(/\/$/, ''), key: terminal.key,
 				system: ($terminalServers ?? []).some((server) => server.id === effectiveTerminalId)
@@ -1358,9 +1358,9 @@
 		let failure: unknown = new Error('目录加载失败，请检查 Terminal 连接');
 		let usedFallback = false;
 		const readDirectory = async (target: string) => {
-			const result = await directoryRequest<TerminalFileList>(
+			const result = (await directoryRequest(
 				terminal, session, `/files/list?directory=${encodeURIComponent(target)}`
-			);
+			)) as TerminalFileList;
 			if (!Array.isArray(result?.entries))
 				throw new TerminalRequestError('Terminal 返回了无效的文件列表', 502);
 			return result;
@@ -2451,7 +2451,7 @@
 		loadingStage = '正在连接工作空间';
 		error = null;
 		try {
-			const serverCwd = await directoryRequest<TerminalCwd>(terminal, session, '/files/cwd', 60000);
+			const serverCwd = (await directoryRequest(terminal, session, '/files/cwd', 60000)) as TerminalCwd;
 			if (!current()) return;
 			if (!serverCwd?.cwd && !serverCwd?.root?.path && !serverCwd?.home)
 				throw new TerminalRequestError('Terminal 未返回工作空间目录', 502);
