@@ -325,10 +325,13 @@
 		};
 	}
 
-	export let messageQueue: { id: string; prompt: string; files: any[]; error?: string }[] = [];
+	export let messageQueue: import('$lib/stores').ChatQueuedMessage[] = [];
 	export let onQueueSendNow: (id: string) => void = () => {};
-	export let onQueueEdit: (id: string) => void = () => {};
+	export let onQueueEdit: (id: string, content?: string | null) => void = () => {};
+	export let onQueueEditStart: (id: string) => void = () => {};
+	export let onQueueMove: (id: string, direction: number) => void = () => {};
 	export let onQueueDelete: (id: string) => void = () => {};
+	export let onSubmitNow: (() => void) | undefined = undefined;
 	export let onUpdate: (data?: { file?: any }) => void = () => {};
 	export let chatTasks = [];
 
@@ -2262,12 +2265,18 @@
 							<div
 								class="mb-1 mx-2 py-0.5 px-1.5 rounded-2xl bg-white dark:bg-gray-900/60 border border-gray-100 dark:border-gray-800/50 overflow-x-hidden overflow-y-auto max-h-[25vh]"
 							>
-								{#each messageQueue as queuedMessage (queuedMessage.id)}
+								{#each messageQueue as queuedMessage, queueIndex (queuedMessage.id)}
 									<QueuedMessageItem
 										id={queuedMessage.id}
 										content={queuedMessage.prompt}
 										error={queuedMessage.error ?? ''}
 										files={queuedMessage.files}
+										sending={queuedMessage.sending ?? false}
+										deliveryPending={!!queuedMessage.delivery}
+										canMoveUp={queueIndex > 0}
+										canMoveDown={queueIndex < messageQueue.length - 1}
+										onMove={onQueueMove}
+										onEditStart={onQueueEditStart}
 										onSendNow={onQueueSendNow}
 										onEdit={onQueueEdit}
 										onDelete={onQueueDelete}
@@ -2580,6 +2589,11 @@
 														const isCtrlPressed = e.ctrlKey || e.metaKey; // metaKey is for Cmd key on Mac
 														const suggestionsContainerElement =
 															document.getElementById('suggestions-container');
+												if (onSubmitNow && (e.key === 'Enter' || e.keyCode === 13) && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !inOrNearComposition(e)) {
+													e.preventDefault();
+													onSubmitNow();
+													return;
+												}
 
 														if (e.key === 'Escape') {
 															stopResponse();
@@ -3231,7 +3245,7 @@
 										{:else}
 											<div class=" flex items-center">
 												<!-- Preserve the former upload label for i18n extraction: $i18n.t('Waiting for upload...') -->
-												<Tooltip content={$i18n.t('Send message')}>
+												<Tooltip content={onSubmitNow ? `${$i18n.t('Send message')} (${$settings?.ctrlEnterToSend ? 'Ctrl + Enter' : 'Enter'}) · ${$i18n.t('Send now')} (Alt + Enter)` : $i18n.t('Send message')}>
 													<button
 														id={inputId === 'chat-input'
 															? 'send-message-button'

@@ -619,6 +619,24 @@ def convert_output_to_messages(
             flush_tool_outputs()
             flush_tool_images()
 
+        if item_type == 'open_webui:user_input':
+            flush_pending()
+            files = item.get('files') or []
+            images = [
+                file for file in files
+                if isinstance(file, dict) and file.get('url') and (
+                    file.get('type') == 'image' or str(file.get('content_type', '')).startswith('image/')
+                )
+            ]
+            content = item.get('text') or ''
+            if images:
+                content = [
+                    {'type': 'text', 'text': content},
+                    *[{'type': 'image_url', 'image_url': {'url': file['url']}} for file in images],
+                ]
+            messages.append({'role': 'user', 'content': content, 'files': files})
+            continue
+
         if item_type == 'message':
             # Extract text from output_text content parts
             content_parts = item.get('content', [])

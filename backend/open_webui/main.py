@@ -27,6 +27,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from open_webui.utils.task_inputs import close_task_input, get_task_input_status, open_task_input, queue_task_input
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import Headers, URL
@@ -1718,6 +1719,11 @@ async def chat_completion(
                         except Exception:
                             log.exception('Failed to publish chat failed event')
         finally:
+            if metadata.get('task_id'):
+                try:
+                    await close_task_input(request.app.state.redis, metadata['task_id'])
+                except Exception:
+                    log.exception('Failed to close task input')
             # Clean up MCP clients.  Each client is isolated so one
             # failure doesn't skip the rest.
             #
@@ -1810,6 +1816,12 @@ async def chat_completion(
                 'message_id': assistant_message_id,
                 'task_id': str(uuid4()),
             }
+            try:
+                await open_task_input(
+                    request.app.state.redis, per_model_metadata['task_id'], chat_id, assistant_message_id, user.id
+                )
+            except Exception:
+                log.exception('Failed to open task input')
 
             if is_saved_chat_id(chat_id):
                 await Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -2156,6 +2168,44 @@ async def stop_task_endpoint(request: Request, task_id: str, user=Depends(get_ad
 @app.get('/api/tasks')
 async def list_tasks_endpoint(request: Request, user=Depends(get_admin_user)):
     return {'tasks': await list_tasks(request.app.state.redis)}
+
+class TaskInputForm(BaseModel):
+    chat_id: str
+    message_id: str
+    id: str
+    content: str
+    files: list[dict] = []
+
+
+@app.post('/api/tasks/{task_id}/input')
+async def submit_task_input(request: Request, task_id: str, form_data: TaskInputForm, user=Depends(get_verified_user)):
+    if not form_data.id or (not form_data.content.strip() and not form_data.files):
+        raise HTTPException(status_code=400, detail='Message is empty')
+    item = {'id': form_data.id, 'content': form_data.content, 'files': form_data.files, 'timestamp': time.time()}
+    state = await queue_task_input(
+        request.app.state.redis, task_id, form_data.chat_id, form_data.message_id, user.id, item
+    )
+    if state == 'closed':
+        raise HTTPException(status_code=409, detail='The response ended before the message could be delivered')
+    return {'status': state}
+
+
+@app.get('/api/tasks/{task_id}/input/{input_id}')
+async def task_input_status(
+    request: Request, task_id: str, input_id: str, chat_id: str, message_id: str,
+    user=Depends(get_verified_user),
+):
+    state = await get_task_input_status(request.app.state.redis, task_id, input_id, chat_id, message_id, user.id)
+    if state is None:
+        raise HTTPException(status_code=404, detail='Task input unavailable')
+    if state in {'pending', 'claimed'} and task_id not in await list_task_ids_by_item_id(request.app.state.redis, chat_id):
+        state = await get_task_input_status(request.app.state.redis, task_id, input_id, chat_id, message_id, user.id)
+        if state is None:
+            raise HTTPException(status_code=404, detail='Task input unavailable')
+        if state in {'pending', 'claimed'}:
+            state = 'closed'
+    return {'status': state}
+
 
 
 @app.get('/api/tasks/chat/{chat_id:path}')

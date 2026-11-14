@@ -414,6 +414,33 @@ export const getTaskIdsByChatId = async (token: string, chat_id: string, signal?
 	return res;
 };
 
+export const submitTaskInput = async (
+	token: string,
+	taskId: string,
+	input: { chat_id: string; message_id: string; id: string; content: string; files: any[] }
+) => {
+	const res = await fetch(`${WEBUI_BASE_URL}/api/tasks/${encodeURIComponent(taskId)}/input`, {
+		method: 'POST',
+		signal: AbortSignal.timeout(15000),
+		headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+		body: JSON.stringify(input)
+	});
+	if (!res.ok) throw { ...(await res.json()), status: res.status };
+	return res.json();
+};
+
+export const getTaskInputStatus = async (
+	token: string, taskId: string, inputId: string, chatId: string, messageId: string
+) => {
+	const query = new URLSearchParams({ chat_id: chatId, message_id: messageId });
+	const res = await fetch(`${WEBUI_BASE_URL}/api/tasks/${encodeURIComponent(taskId)}/input/${encodeURIComponent(inputId)}?${query}`, {
+		signal: AbortSignal.timeout(15000),
+		headers: { Authorization: `Bearer ${token}` }
+	});
+	if (!res.ok) throw { ...(await res.json()), status: res.status };
+	return res.json();
+};
+
 export const resumeTemporaryChat = async (token: string, chatId: string, sessionId: string) => {
 	const res = await fetch(`${WEBUI_BASE_URL}/api/tasks/chat/${encodeURIComponent(chatId)}/resume`, {
 		method: 'POST',

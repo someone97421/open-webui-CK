@@ -75,10 +75,13 @@
 	export let onUpdate: (data?: { file?: any }) => void = () => {};
 	export let onChange = (e) => {};
 	export let onWebSearchToggle: Function = () => {};
-	export let messageQueue: { id: string; prompt: string; files: any[] }[] = [];
+	export let messageQueue: import('$lib/stores').ChatQueuedMessage[] = [];
 	export let onQueueSendNow: (id: string) => void = () => {};
-	export let onQueueEdit: (id: string) => void = () => {};
+	export let onQueueEdit: (id: string, content?: string | null) => void = () => {};
+	export let onQueueEditStart: (id: string) => void = () => {};
+	export let onQueueMove: (id: string, direction: number) => void = () => {};
 	export let onQueueDelete: (id: string) => void = () => {};
+	export let onSubmitNow: () => void = () => {};
 	export let askUser = {
 		show: false,
 		questions: [],
@@ -282,6 +285,9 @@
 						{messageQueue}
 						{onQueueSendNow}
 						{onQueueEdit}
+						{onQueueEditStart}
+						{onQueueMove}
+						{onSubmitNow}
 						{onQueueDelete}
 						{askUser}
 						{onWebSearchToggle}

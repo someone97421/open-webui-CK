@@ -87,6 +87,7 @@ from open_webui.utils.ask_user import stage_ask_user_tool_calls
 from open_webui.utils.audit import log_model_usage
 from open_webui.utils.auth import get_verified_user_by_id
 from open_webui.utils.chat import generate_chat_completion
+from open_webui.utils.task_inputs import close_task_input, finish_task_inputs, take_task_inputs
 from open_webui.utils.chat_id import is_saved_chat_id, is_temporary_chat_id
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.context_compaction import apply_summary_checkpoint, compact_messages_for_request
@@ -6024,13 +6025,101 @@ async def streaming_chat_response_handler(response, ctx):
                             }
                         )
 
-                while tool_calls:
+                async def pending_task_inputs(close_if_empty=False):
+                    if not metadata.get('task_id'):
+                        return []
+                    try:
+                        return await take_task_inputs(
+                            request.app.state.redis, response_stream_task_id, close_if_empty=close_if_empty
+                        )
+                    except Exception:
+                        log.exception('Failed to read task inputs')
+                        return []
+
+                async def prepare_task_inputs(items):
+                    input_context = {}
+                    accepted = []
+                    for item in items:
+                        try:
+                            attached = item.get('files') or []
+                            for file in attached:
+                                if file.get('type') == 'filesystem' and (
+                                    not metadata.get('terminal_id')
+                                    or file.get('terminal_id') not in (None, metadata.get('terminal_id'))
+                                    or file.get('session_id') not in (None, chat_id)
+                                ):
+                                    raise ValueError('Attachment belongs to another workspace')
+                            documents = [
+                                file for file in attached
+                                if file.get('type') not in ('image', 'filesystem')
+                                and not is_raster_image_content_type(file.get('content_type'))
+                            ]
+                            if documents and is_file_context_enabled(model, metadata):
+                                file_request = {
+                                    'model': form_data['model'],
+                                    'messages': [{'role': 'user', 'content': item['content']}],
+                                    'metadata': {**metadata, 'files': documents},
+                                }
+                                _, flags = await chat_completion_files_handler(request, file_request, extra_params, user)
+                                source_context = get_source_context(flags.get('sources') or []).strip()
+                                if source_context:
+                                    input_context[item['id']] = await rag_template(
+                                        await Config.get('rag.template'), source_context, item['content']
+                                    )
+                                elif not metadata.get('include_file_context'):
+                                    raise ValueError('Attachment content unavailable')
+                            elif documents and not metadata.get('include_file_context'):
+                                raise ValueError('Attachments are unavailable for this response')
+                            if attached and not metadata.get('include_file_context') and any(
+                                file.get('type') == 'filesystem' for file in attached
+                            ):
+                                raise ValueError('Workspace attachments are unavailable for this response')
+                            accepted.append(item)
+                        except Exception:
+                            log.exception('Failed to prepare task input attachments')
+                            await finish_task_inputs(request.app.state.redis, response_stream_task_id, [item], False)
+                    return accepted, input_context
+
+                def add_input_context(input_messages, items, input_context):
+                    if not items:
+                        return
+                    users = [message for message in input_messages if message.get('role') == 'user']
+                    for message, item in zip(users[-len(items):], items):
+                        content = input_context.get(item['id'])
+                        if content is None:
+                            continue
+                        if isinstance(message.get('content'), list):
+                            message['content'] = [
+                                {**part, 'text': content} if part.get('type') == 'text' else part
+                                for part in message['content']
+                            ]
+                        else:
+                            message['content'] = content
+
+                def task_input_output(items):
+                    return [
+                        {
+                            'type': 'open_webui:user_input', 'id': item['id'], 'text': item['content'],
+                            'files': item.get('files', []), 'timestamp': item.get('timestamp'),
+                        }
+                        for item in items
+                    ]
+
+                pending_inputs = []
+                while True:
+                    had_tool_calls = bool(tool_calls)
+                    if not had_tool_calls:
+                        if DETECT_CODE_INTERPRETER and output and output[-1].get('type') == 'open_webui:code_interpreter':
+                            break
+                        pending_inputs = await pending_task_inputs(close_if_empty=True)
+                        if not pending_inputs:
+                            break
                     round_error = stop_reason
                     if max_tool_call_iterations is not None and tool_call_iterations >= max_tool_call_iterations:
                         round_error = 'Tool-call iteration limit reached.'
                     if final_answer_requested:
                         round_error = round_error or 'Tool calls are disabled for this response.'
-                    if not round_error:
+                    if had_tool_calls and not round_error:
                         tool_call_iterations += 1
 
                     # Resolve dispatch before approvals and special handling such as ask_user.
@@ -6038,7 +6127,7 @@ async def streaming_chat_response_handler(response, ctx):
                     output_by_call_id = {
                         item.get('call_id'): item for item in output if item.get('type') == 'function_call'
                     }
-                    for tool_call in split_tool_call_batches(tool_calls.pop(0), metadata.get('tools', {})):
+                    for tool_call in split_tool_call_batches(tool_calls.pop(0) if had_tool_calls else [], metadata.get('tools', {})):
                         error = tool_call.get('execution_error') or resolve_tool_call(
                             tool_call, metadata.get('tools', {})
                         )
@@ -6285,9 +6374,17 @@ async def streaming_chat_response_handler(response, ctx):
                         return
 
                     await emit_output()
-                    if final_answer_requested:
+                    if final_answer_requested and had_tool_calls:
                         await emit_message_error(round_error or 'The provider requested tools after tool use stopped.')
                         break
+
+                    if had_tool_calls:
+                        pending_inputs = await pending_task_inputs()
+                    pending_inputs, input_context = await prepare_task_inputs(pending_inputs)
+                    if not had_tool_calls and not pending_inputs:
+                        continue
+                    input_output = task_input_output(pending_inputs)
+                    output.extend(input_output)
 
                     try:
                         new_form_data = {
@@ -6302,9 +6399,15 @@ async def streaming_chat_response_handler(response, ctx):
                                 item for item in strip_tool_images(output, model)
                                 if item.get('type') == 'function_call_output'
                             ]
+                            input_messages = convert_output_to_messages(input_output, raw=True, flatten_tool_images=True)
+                            add_input_context(input_messages, pending_inputs, input_context)
                             new_form_data['messages'] = (
-                                [system_message] if system_message else []
-                            ) + [{'role': 'assistant', 'output': tool_outputs}]
+                                ([system_message] if system_message else [])
+                                + ([{'role': 'assistant', 'output': tool_outputs}] if tool_outputs else [])
+                                + process_messages_with_output(
+                                    input_messages, include_file_context=bool(metadata.get('include_file_context'))
+                                )
+                            )
                             new_form_data['previous_response_id'] = last_response_id
                         else:
                             tool_messages = convert_output_to_messages(
@@ -6313,6 +6416,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 reasoning_format=get_reasoning_format(model),
                                 flatten_tool_images=True,
                             )
+                            add_input_context(tool_messages, pending_inputs, input_context)
 
                             if current_usage and tool_messages:
                                 tool_messages[0]['usage'] = current_usage
@@ -6322,7 +6426,9 @@ async def streaming_chat_response_handler(response, ctx):
 
                             # Use the existing checkpoint format internally and strip it from the provider payload.
                             def get_request_messages(messages: list[dict]) -> list[dict]:
-                                request_messages = process_messages_with_output(messages)
+                                request_messages = process_messages_with_output(
+                                    messages, include_file_context=bool(metadata.get('include_file_context'))
+                                )
                                 context_summary = next(
                                     (
                                         message['contextSummary']
@@ -6426,6 +6532,20 @@ async def streaming_chat_response_handler(response, ctx):
                             bypass_system_prompt=True,
                         )
 
+                        if pending_inputs and isinstance(res, StreamingResponse) and getattr(res, 'status_code', 200) < 400:
+                            await finish_task_inputs(request.app.state.redis, response_stream_task_id, pending_inputs, True)
+                            pending_inputs = []
+                            if save_to_chat:
+                                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                    metadata['chat_id'], metadata['message_id'], {'output': full_output()}
+                                )
+                            await emit_output()
+                        elif pending_inputs:
+                            await finish_task_inputs(request.app.state.redis, response_stream_task_id, pending_inputs, False)
+                            for item in input_output:
+                                if item in output:
+                                    output.remove(item)
+                            pending_inputs = []
                         if isinstance(res, StreamingResponse):
                             # Reset response-relative output indices; keep prior output as the UI history prefix.
                             prior_output = list(full_output())
@@ -6452,6 +6572,12 @@ async def streaming_chat_response_handler(response, ctx):
                         else:
                             break
                     except Exception as e:
+                        if pending_inputs:
+                            await finish_task_inputs(request.app.state.redis, response_stream_task_id, pending_inputs, False)
+                            for item in input_output:
+                                if item in output:
+                                    output.remove(item)
+                            pending_inputs = []
                         error_content = get_message_error_content(e)
                         log.exception('Tool-call continuation failed: %s', error_content)
                         await emit_message_error(error_content)
@@ -6598,22 +6724,32 @@ async def streaming_chat_response_handler(response, ctx):
                                 },
                             }
                         )
+                        pending_inputs = await pending_task_inputs()
+                        pending_inputs, input_context = await prepare_task_inputs(pending_inputs)
+                        input_output = task_input_output(pending_inputs)
+                        output.extend(input_output)
 
                         try:
+                            ci_messages = convert_output_to_messages(
+                                strip_tool_images(output, model),
+                                raw=True,
+                                reasoning_format=get_reasoning_format(model),
+                                flatten_tool_images=True,
+                            )
+                            add_input_context(ci_messages, pending_inputs, input_context)
+                            ci_request_messages = [*messages, *ci_messages]
+                            if pending_inputs:
+                                ci_request_messages = process_messages_with_output(
+                                    ci_request_messages, include_file_context=bool(metadata.get('include_file_context'))
+                                )
                             new_form_data = {
                                 **form_data,
                                 'stream': True,
                                 'metadata': metadata,
-                                'messages': [
-                                    *messages,
-                                    *convert_output_to_messages(
-                                        strip_tool_images(output, model),
-                                        raw=True,
-                                        reasoning_format=get_reasoning_format(model),
-                                        flatten_tool_images=True,
-                                    ),
-                                ],
+                                'messages': ci_request_messages,
                             }
+                            if pending_inputs:
+                                new_form_data = await convert_url_images_to_base64(new_form_data, user=user)
 
                             if filter_functions:
                                 new_form_data, _ = await process_filter_functions(
@@ -6634,6 +6770,20 @@ async def streaming_chat_response_handler(response, ctx):
                                 bypass_system_prompt=True,
                             )
 
+                            if pending_inputs and isinstance(res, StreamingResponse) and getattr(res, 'status_code', 200) < 400:
+                                await finish_task_inputs(request.app.state.redis, response_stream_task_id, pending_inputs, True)
+                                pending_inputs = []
+                                if save_to_chat:
+                                    await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                        metadata['chat_id'], metadata['message_id'], {'output': full_output()}
+                                    )
+                                await event_emitter({'type': 'chat:completion', 'data': {'output': full_output()}})
+                            elif pending_inputs:
+                                await finish_task_inputs(request.app.state.redis, response_stream_task_id, pending_inputs, False)
+                                for item in input_output:
+                                    if item in output:
+                                        output.remove(item)
+                                pending_inputs = []
                             if isinstance(res, StreamingResponse):
                                 try:
                                     await stream_body_handler(res, new_form_data)
@@ -6645,10 +6795,22 @@ async def streaming_chat_response_handler(response, ctx):
                             else:
                                 break
                         except Exception as e:
+                            if pending_inputs:
+                                await finish_task_inputs(request.app.state.redis, response_stream_task_id, pending_inputs, False)
+                                for item in input_output:
+                                    if item in output:
+                                        output.remove(item)
+                                pending_inputs = []
                             error_content = get_message_error_content(e)
                             log.exception('Code interpreter continuation failed: %s', error_content)
                             await emit_message_error(error_content)
                             break
+
+                if metadata.get('task_id'):
+                    try:
+                        await close_task_input(request.app.state.redis, response_stream_task_id)
+                    except Exception:
+                        log.exception('Failed to close task input')
 
                 # Mark all in-progress items as completed
                 for item in [*prior_output, *output]:

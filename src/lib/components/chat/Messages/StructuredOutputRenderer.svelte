@@ -3,6 +3,9 @@
 	import { getContext } from 'svelte';
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
 	import Image from '$lib/components/common/Image.svelte';
+	import FileItem from '$lib/components/common/FileItem.svelte';
+	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { isRasterImageContentType } from '$lib/utils';
 	import ToolCallDisplay from '$lib/components/common/ToolCallDisplay.svelte';
 	import ToolOutputFile from './ToolOutputFile.svelte';
 	import { resolveChatMessageToolCall } from '$lib/apis/chats';
@@ -132,6 +135,19 @@
 				{displayItem.text}
 			</div>
 		{/if}
+	{:else if displayItem.type === 'user_input'}
+		<div class="my-2 ml-auto w-fit max-w-[90%] rounded-2xl bg-gray-100 px-3 py-2 text-sm text-gray-800 dark:bg-gray-800 dark:text-gray-100">
+			{#if displayItem.text}<div class="whitespace-pre-wrap break-words">{displayItem.text}</div>{/if}
+			{#each displayItem.files as file}
+				{#if file.type === 'image' || isRasterImageContentType(file?.content_type)}
+					{@const fileUrl = file.url?.startsWith('data') || file.url?.startsWith('http')
+						? file.url : `${WEBUI_API_BASE_URL}/files/${file.url}${file?.content_type ? '/content' : ''}`}
+					<Image src={fileUrl} imageClassName="max-h-96 rounded-lg" />
+				{:else}
+					<FileItem item={file} url={file.url} name={file.name} type={file.type} size={file?.size} small={true} />
+				{/if}
+			{/each}
+		</div>
 	{:else if displayItem.type === 'image'}
 		<Image src={displayItem.src} alt={$i18n.t('Generated Image')} />
 	{:else if displayItem.type === 'detail_group'}

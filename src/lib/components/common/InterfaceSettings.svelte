@@ -79,7 +79,6 @@
 	let insertFollowUpPrompt = false;
 
 	let regenerateMenu = true;
-	let enableMessageQueue = true;
 
 	let landingPageMode = '';
 	let chatBubble = true;
@@ -362,7 +361,6 @@
 		insertFollowUpPrompt = currentSettings?.insertFollowUpPrompt ?? false;
 
 		regenerateMenu = currentSettings?.regenerateMenu ?? true;
-		enableMessageQueue = currentSettings?.enableMessageQueue ?? true;
 
 		largeTextAsFile = currentSettings?.largeTextAsFile ?? false;
 		copyFormatted = currentSettings?.copyFormatted ?? false;
@@ -797,33 +795,6 @@
 
 	<div class={sectionHeadingClass}>
 		{$i18n.t('settings.personal.interface.sections.chat.title')}
-	</div>
-
-	<div>
-		<div class={settingRowClass}>
-			<label
-				id="enable-message-queue-label"
-				class={settingLabelClass}
-				for="enable-message-queue-label-control"
-			>
-				{$i18n.t('settings.personal.interface.enableMessageQueue.label')}
-			</label>
-
-			<div class={settingControlClass}>
-				<Switch
-					ariaLabelledbyId="enable-message-queue-label"
-					tooltip={true}
-					bind:state={enableMessageQueue}
-					inherited={isDefaultSetting('enableMessageQueue')}
-					on:change={() => {
-						saveSettings({ enableMessageQueue });
-					}}
-				/>
-			</div>
-		</div>
-		<p class={settingDescriptionClass}>
-			{$i18n.t('settings.personal.interface.enableMessageQueue.description')}
-		</p>
 	</div>
 
 	<div>

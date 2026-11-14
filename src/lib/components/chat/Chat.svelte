@@ -57,6 +57,8 @@
 		showFileNavPath,
 		showFileNavDir,
 		chatRequestQueues,
+		chatDirectInputAttempts,
+		chatRecoveredDrafts,
 		desktopEvent
 	} from '$lib/stores';
 	import { refreshChatList, refreshFolderChatLists } from '$lib/stores/chatList';
@@ -134,7 +136,9 @@
 		generateMoACompletion,
 		stopTask,
 		stopTasksByChatId,
-		getTaskIdsByChatId
+		getTaskIdsByChatId,
+		submitTaskInput,
+		getTaskInputStatus
 	} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
 	import { getSkills } from '$lib/apis/skills';
@@ -3265,10 +3269,6 @@
 				if (loading) {
 					if (chatIdProp && !$temporaryChatEnabled) updateLastReadAt(chatIdProp);
 
-					const lastMessage = history.currentId ? history.messages[history.currentId] : null;
-					if (!lastMessage || lastMessage.role !== 'assistant' || lastMessage.done) {
-						await processNextInQueue(chatIdProp);
-					}
 					if (signal.aborted) return;
 					const restored = await restoreChatInput(
 						sessionStorage.getItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`),
@@ -3281,6 +3281,7 @@
 					loading = false;
 					await tick();
 					if (signal.aborted) return;
+					void processNextInQueue(id);
 					messageInput?.focus({ preventScroll: true });
 				}
 				return true;
@@ -3363,114 +3364,153 @@
 	};
 
 	let processingQueueChats = new Set<string>();
+	let chatComponentDestroyed = false;
+	onDestroy(() => { chatComponentDestroyed = true; });
+	let inputSubmitting = false;
+	$: if (!loading && $chatId && (!isSavedChatId($chatId) || chat?.id === $chatId) && $chatRecoveredDrafts[$chatId]?.length) {
+		const recovered = $chatRecoveredDrafts[$chatId];
+		chatRecoveredDrafts.update((drafts) => {
+			const { [$chatId]: _, ...remaining } = drafts;
+			return remaining;
+		});
+		const recoveredText = recovered.map((draft) => draft.prompt).filter(Boolean).join('\n\n');
+		prompt = [recoveredText, prompt].filter(Boolean).join('\n\n');
+		files = recovered.reduce((current, draft) => mergeFiles(current, draft.files), files);
+		messageInput?.setText(prompt);
+	}
+	class TaskInputEnded extends Error {}
+
+	const activeResponse = () => {
+		const current = history.currentId ? history.messages[history.currentId] : null;
+		if (current?.role === 'assistant' && !current.done) return current;
+		const siblings = current?.parentId ? history.messages[current.parentId]?.childrenIds ?? [] : [];
+		return siblings.map((id) => history.messages[id]).find((message) => message?.role === 'assistant' && !message.done) ?? null;
+	};
+
+	const updateQueuedItem = (chatId: string, id: string, patch: Record<string, any>) => {
+		chatRequestQueues.update((queues) => ({
+			...queues,
+			[chatId]: (queues[chatId] ?? []).map((item) => item.id === id ? { ...item, ...patch } : item)
+		}));
+	};
+	const removeQueuedItem = (chatId: string, id: string) => {
+		chatRequestQueues.update((queues) => ({
+			...queues, [chatId]: (queues[chatId] ?? []).filter((item) => item.id !== id)
+		}));
+	};
 
 	const processNextInQueue = async (targetChatId: string) => {
-		if (processingQueueChats.has(targetChatId) || targetChatId !== $chatId) return;
-
-		const queue = $chatRequestQueues[targetChatId];
-		if (!queue || queue.length === 0 || queue[0].error) return;
-		const lastMessage = history.currentId ? history.messages[history.currentId] : null;
-		if (
-			(lastMessage && lastMessage.role === 'assistant' && !lastMessage.done) ||
-			queue.some((m) =>
-				(m.files ?? []).some((file) => ['uploading', 'error'].includes(file.status))
-			)
-		) {
-			return;
-		}
+		if (chatComponentDestroyed || processingQueueChats.has(targetChatId) || targetChatId !== $chatId || inputSubmitting || loading || processing || activeResponse()) return;
+		const item = ($chatRequestQueues[targetChatId] ?? [])[0];
+		if (!item || item.error || item.sending || item.editing || item.delivery ||
+			(item.files ?? []).some((file) => ['uploading', 'error'].includes(file.status))) return;
 
 		processingQueueChats.add(targetChatId);
-		const boundary = queue.findIndex((entry) =>
-			entry.files.some((file: any) => file.type === 'filesystem')
-		);
-		const queuedMessages =
-			embedded || boundary === 0
-				? queue.slice(0, 1)
-				: boundary < 0
-					? [...queue]
-					: queue.slice(0, boundary);
-		const queuedMessageIds = new Set(queuedMessages.map((m) => m.id));
+		updateQueuedItem(targetChatId, item.id, { sending: true });
 		try {
-			const combinedPrompt = queuedMessages.map((m) => m.prompt).join('\n\n');
-			const combinedFiles = queuedMessages.flatMap((m) => m.files);
-
-			chatRequestQueues.update((q) => ({
-				...q,
-				[targetChatId]: (q[targetChatId] ?? []).filter((m) => !queuedMessageIds.has(m.id))
-			}));
-
-			await submitPrompt(combinedPrompt, combinedFiles);
+			const result = await submitPrompt(item.prompt, item.files);
+			if (result?.status !== 'submitted') throw new Error($i18n.t('Failed to send message'));
+			removeQueuedItem(targetChatId, item.id);
 		} catch (error) {
-			console.error(error);
-			chatRequestQueues.update((q) => ({
-				...q,
-				[targetChatId]: [
-					...queuedMessages.map((entry) => ({ ...entry, error: String(error) })),
-					...(q[targetChatId] ?? [])
-				]
-			}));
+			updateQueuedItem(targetChatId, item.id, { sending: false, error: getErrorMessage(error) });
 		} finally {
 			processingQueueChats.delete(targetChatId);
+			if ($chatId === targetChatId && !activeResponse()) void processNextInQueue(targetChatId);
 		}
 	};
 
-	const sendQueuedMessageNow = async (id) => {
-		if (processingQueueChats.has($chatId)) return;
-
-		const queue = $chatRequestQueues[$chatId] ?? [];
-		const item = queue.find((m) => m.id === id);
-		if (!item || (item.files ?? []).some((file) => ['uploading', 'error'].includes(file.status))) {
-			return;
-		}
-
-		const targetChatId = $chatId;
-		processingQueueChats.add(targetChatId);
+	const deliverTaskInput = async (
+		targetChatId: string, target: { taskId: string; messageId: string },
+		item: { id: string; prompt: string; files: any[] }
+	) => {
+		let result;
 		try {
-			chatRequestQueues.update((q) => ({
-				...q,
-				[targetChatId]: queue.filter((m) => m.id !== id)
-			}));
-			await stopResponse(false);
-			await tick();
-			await submitPrompt(item.prompt, item.files);
-		} catch (error) {
-			toast.error(String(error));
-			chatRequestQueues.update((q) => ({
-				...q,
-				[targetChatId]: [{ ...item, error: String(error) }, ...(q[targetChatId] ?? [])]
-			}));
-		} finally {
-			processingQueueChats.delete(targetChatId);
-			// Completion can arrive before submitPrompt returns, while the queue is locked.
-			if ($chatId === targetChatId) {
-				await processNextInQueue(targetChatId);
+			result = await submitTaskInput(localStorage.token, target.taskId, {
+				chat_id: targetChatId, message_id: target.messageId, id: item.id,
+				content: item.prompt, files: item.files
+			});
+			while (result.status === 'pending' || result.status === 'claimed') {
+				await new Promise((resolve) => setTimeout(resolve, 500));
+				result = await getTaskInputStatus(localStorage.token, target.taskId, item.id, targetChatId, target.messageId);
 			}
+		} catch (error) {
+			if (error?.status === 409) throw new TaskInputEnded($i18n.t('The response ended before the message could be delivered'));
+			throw error;
+		}
+		if (result.status === 'closed') throw new TaskInputEnded($i18n.t('The response ended before the message could be delivered'));
+		if (result.status === 'failed') throw new TaskInputEnded($i18n.t('Failed to send message'));
+		if (result.status !== 'delivered') throw new Error($i18n.t('Failed to send message'));
+	};
+
+	const sendQueuedMessageNow = async (id: string) => {
+		const targetChatId = $chatId;
+		if (processingQueueChats.has(targetChatId)) return;
+		const item = ($chatRequestQueues[targetChatId] ?? []).find((entry) => entry.id === id);
+		if (!item || item.sending || item.editing || (item.files ?? []).some((file) => ['uploading', 'error'].includes(file.status))) return;
+		const response = activeResponse();
+		if (!response && !item.delivery) {
+			chatRequestQueues.update((queues) => ({
+				...queues, [targetChatId]: [{ ...item, error: undefined }, ...(queues[targetChatId] ?? []).filter((entry) => entry.id !== id)]
+			}));
+			await processNextInQueue(targetChatId);
+			return;
+		}
+		const target = item.delivery ?? (response ? {
+			taskId: response.meta?.task_id ?? (taskIds?.length === 1 ? taskIds[0] : ''),
+			messageId: response.id, inputId: uuidv4()
+		} : null);
+		if (!target?.taskId) {
+			toast.error($i18n.t('The current response is still starting; try again.'));
+			return;
+		}
+		updateQueuedItem(targetChatId, id, { sending: true, error: undefined, delivery: target });
+		try {
+			await deliverTaskInput(targetChatId, target, { ...item, id: target.inputId });
+			removeQueuedItem(targetChatId, id);
+		} catch (error) {
+			const detail = getErrorMessage(error);
+			updateQueuedItem(targetChatId, id, {
+				sending: false, error: detail,
+				...((error instanceof TaskInputEnded || error?.status === 409) ? { delivery: undefined } : {})
+			});
+			toast.error(detail);
+		} finally {
+			if ($chatId === targetChatId && !activeResponse()) void processNextInQueue(targetChatId);
 		}
 	};
 
-	const editQueuedMessage = async (id) => {
-		const queue = $chatRequestQueues[$chatId] ?? [];
-		const item = queue.find((m) => m.id === id);
-		if (!item) return;
-
-		chatRequestQueues.update((q) => ({
-			...q,
-			[$chatId]: queue.filter((m) => m.id !== id)
-		}));
-		files = item.files;
-		messageInput?.setText(item.prompt);
-
-		await processNextInQueue($chatId);
+	const queuedMessageChatId = (id: string) =>
+		Object.keys(get(chatRequestQueues)).find((chatId) => get(chatRequestQueues)[chatId].some((item) => item.id === id));
+	const startEditingQueuedMessage = (id: string) => updateQueuedItem($chatId, id, { editing: true });
+	const editQueuedMessage = (id: string, content?: string | null) => {
+		const targetChatId = queuedMessageChatId(id);
+		if (!targetChatId) return;
+		const item = (get(chatRequestQueues)[targetChatId] ?? []).find((entry) => entry.id === id);
+		if (!item || item.sending || item.delivery) return;
+		updateQueuedItem(targetChatId, id, {
+			editing: false,
+			...(content != null ? { prompt: content, error: undefined, delivery: undefined } : {})
+		});
+		void processNextInQueue(targetChatId);
 	};
-
-	const deleteQueuedMessage = async (id) => {
-		const queue = $chatRequestQueues[$chatId] ?? [];
-		chatRequestQueues.update((q) => ({
-			...q,
-			[$chatId]: queue.filter((m) => m.id !== id)
-		}));
-
-		await processNextInQueue($chatId);
+	const moveQueuedMessage = (id: string, direction: number) => {
+		const targetChatId = $chatId;
+		if (processingQueueChats.has(targetChatId)) return;
+		chatRequestQueues.update((queues) => {
+			const queue = [...(queues[targetChatId] ?? [])];
+			const index = queue.findIndex((item) => item.id === id);
+			const next = index + direction;
+			if (index < 0 || next < 0 || next >= queue.length || queue[index].editing || queue[next].editing) return queues;
+			[queue[index], queue[next]] = [queue[next], queue[index]];
+			return { ...queues, [targetChatId]: queue };
+		});
+		void processNextInQueue(targetChatId);
+	};
+	const deleteQueuedMessage = (id: string) => {
+		const item = ($chatRequestQueues[$chatId] ?? []).find((entry) => entry.id === id);
+		if (!item || item.sending || item.delivery) return;
+		removeQueuedItem($chatId, id);
+		void processNextInQueue($chatId);
 	};
 
 	const chatCompletedHandler = async (_chatId, modelId, responseMessageId, messages) => {
@@ -4185,14 +4225,34 @@
 		}
 	});
 
-	const submitHandler = async (
+	const submitInput = async (
 		userPrompt: string,
 		{
 			_raw = false,
-			bridge: bridgeRequest = null
-		}: { _raw?: boolean; bridge?: { userMessageId: string; modelId: string } | null } = {}
+			bridge: bridgeRequest = null,
+			immediate = false
+		}: { _raw?: boolean; bridge?: { userMessageId: string; modelId: string } | null; immediate?: boolean } = {}
 	): Promise<BridgeSubmission> => {
 		if (loading || folderModeError || attachmentsLoading || !attachmentsInitialized) return { status: 'rejected' };
+		const initialDraft = prompt;
+		const responseAtSubmit = immediate ? activeResponse() : null;
+		const taskAtSubmit = responseAtSubmit?.meta?.task_id ?? (taskIds?.length === 1 ? taskIds[0] : '');
+		const matchingAttempt = Object.values(get(chatDirectInputAttempts)).find(
+			(attempt) => attempt.chatId === $chatId && attempt.draft === initialDraft && equal(attempt.files, files)
+		);
+		const previousAttempt = immediate ? matchingAttempt : null;
+		const immediateTarget = previousAttempt ?? (responseAtSubmit ? {
+			id: uuidv4(), chatId: $chatId, taskId: taskAtSubmit, messageId: responseAtSubmit.id,
+			prompt: userPrompt, draft: initialDraft, files: [], inFlight: false
+		} : null);
+		if (responseAtSubmit && !immediateTarget?.taskId) {
+			toast.error($i18n.t('The current response is still starting; try again.'));
+			return { status: 'rejected' };
+		}
+		if ((!immediate && matchingAttempt) || previousAttempt?.inFlight) {
+			toast.error($i18n.t('Check the previous delivery with Alt + Enter before sending again.'));
+			return { status: 'rejected' };
+		}
 		if (files.some((file: any) => file.type === 'filesystem' &&
 			(!project || file.terminal_id !== project.terminal_id))) {
 			toast.error('文件所属工作区与当前会话不一致，请重新上传。');
@@ -4332,16 +4392,53 @@
 			if (history === currentHistory) processing = '';
 		}
 
-		if (
-			($chatRequestQueues[$chatId] ?? []).some((m) =>
-				(m.files ?? []).some((file) => ['uploading', 'error'].includes(file.status))
-			) ||
-			(files.length > 0 && files.some((file) => ['uploading', 'error'].includes(file.status)))
-		) {
+		if (files.some((file) => ['uploading', 'error'].includes(file.status))) {
+			toast.error($i18n.t('Waiting for upload'));
+			return { status: 'rejected' };
+		}
+
+		if (immediateTarget) {
+			const inputFiles = previousAttempt?.files ?? structuredClone(files);
+			const attempt = { ...immediateTarget, files: inputFiles, inFlight: true };
+			chatDirectInputAttempts.update((attempts) => ({ ...attempts, [attempt.id]: attempt }));
+			messageInput?.setText('');
+			prompt = '';
+			files = [];
+			void (async () => {
+				try {
+					await deliverTaskInput(attempt.chatId, attempt, { id: attempt.id, prompt: attempt.prompt, files: inputFiles });
+					chatDirectInputAttempts.update((attempts) => {
+						const { [attempt.id]: _, ...remaining } = attempts;
+						return remaining;
+					});
+				} catch (error) {
+					chatDirectInputAttempts.update((attempts) => {
+						if (error instanceof TaskInputEnded || error?.status === 409) {
+							const { [attempt.id]: _, ...remaining } = attempts;
+							return remaining;
+						}
+						return { ...attempts, [attempt.id]: { ...attempt, inFlight: false } };
+					});
+					chatRecoveredDrafts.update((drafts) => ({
+						...drafts,
+						[attempt.chatId]: [...(drafts[attempt.chatId] ?? []), { prompt: initialDraft, files: inputFiles }]
+					}));
+					toast.error(getErrorMessage(error));
+				}
+			})();
+			return { status: 'submitted', chatId: attempt.chatId, assistantMessageId: attempt.messageId };
+		}
+
+		const isGenerating = bridgeRequest
+			? createMessagesList(history, bridgeRequest.userMessageId).some(
+					(message) => message.role === 'assistant' && !message.done
+				)
+			: !!activeResponse();
+		if (isGenerating || processingQueueChats.has($chatId) || (!immediate && ($chatRequestQueues[$chatId] ?? []).length > 0)) {
 			if (bridgeRequest) return { status: 'deferred' };
-			chatRequestQueues.update((q) => ({
-				...q,
-				[$chatId]: [...(q[$chatId] ?? []), { id: uuidv4(), prompt: userPrompt, files }]
+			chatRequestQueues.update((queues) => ({
+				...queues,
+				[$chatId]: [...(queues[$chatId] ?? []), { id: uuidv4(), prompt: userPrompt, files: structuredClone(files) }]
 			}));
 			messageInput?.setText('');
 			prompt = '';
@@ -4349,48 +4446,47 @@
 			return { status: 'rejected' };
 		}
 
-		// Check if the assistant is still generating the main response
-		// (don't block on background tasks like title gen, follow-ups, tags)
-		const lastMessage = history.currentId ? history.messages[history.currentId] : null;
-		const isGenerating = bridgeRequest
-			? createMessagesList(history, bridgeRequest.userMessageId).some(
-					(message) => message.role === 'assistant' && !message.done
-				)
-			: lastMessage && lastMessage.role === 'assistant' && !lastMessage.done;
-
-		if (isGenerating) {
-			if (bridgeRequest) return { status: 'deferred' };
-			if ($settings?.enableMessageQueue ?? true) {
-				// Enqueue the request
-				const _files = structuredClone(files);
-				chatRequestQueues.update((q) => ({
-					...q,
-					[$chatId]: [...(q[$chatId] ?? []), { id: uuidv4(), prompt: userPrompt, files: _files }]
-				}));
-				// Clear input
-				messageInput?.setText('');
-				prompt = '';
-				files = [];
-				return { status: 'rejected' };
-			} else {
-				// Interrupt: stop current generation and proceed
-				await stopResponse();
-				await tick();
-			}
-		}
-
-		// Clear input and submit
+		const targetChatId = $chatId;
 		messageInput?.setText('');
 		prompt = '';
-		const _files = structuredClone(files);
+		const inputFiles = structuredClone(files);
 		files = [];
-		messageInput?.setText('');
+		let result: BridgeSubmission = { status: 'rejected' };
+		try {
+			result = (await submitPrompt(userPrompt, inputFiles, bridgeRequest)) ?? result;
+		} catch (error) {
+			toast.error(getErrorMessage(error));
+		}
+		if (result.status !== 'submitted' && !bridgeRequest) {
+			chatRecoveredDrafts.update((drafts) => ({
+				...drafts,
+				[targetChatId]: [...(drafts[targetChatId] ?? []), { prompt: initialDraft, files: inputFiles }]
+			}));
+		}
+		return result;
+	};
 
-		return (
-			(await submitPrompt(userPrompt, _files, bridgeRequest)) ?? {
-				status: 'rejected'
-			}
-		);
+	const submitHandler = async (
+		userPrompt: string,
+		options: { _raw?: boolean; bridge?: { userMessageId: string; modelId: string } | null; immediate?: boolean } = {}
+	): Promise<BridgeSubmission> => {
+		if (inputSubmitting) return { status: 'deferred' };
+		inputSubmitting = true;
+		try {
+			return await submitInput(userPrompt, options);
+		} finally {
+			inputSubmitting = false;
+			if ($chatId && !activeResponse()) void processNextInQueue($chatId);
+		}
+	};
+
+	const submitNow = () => {
+		if (!prompt.trim() && files.length === 0) {
+			const first = ($chatRequestQueues[$chatId] ?? [])[0];
+			if (first) void sendQueuedMessageNow(first.id);
+		} else {
+			void submitHandler(withSelectedText(prompt), { immediate: true });
+		}
 	};
 
 	const sendMessage = async (
@@ -4544,10 +4640,17 @@
 				);
 				submittedTaskIds =
 					completion?.task_ids ?? (completion?.task_id ? [completion.task_id] : []);
+				if (!completion || completion.error) throw new Error(getErrorMessage(completion?.error));
+				messageIdsList.forEach(({ message_id }, index) => {
+					const message = history.messages[message_id];
+					if (message && submittedTaskIds[index]) message.meta = { ...message.meta, task_id: submittedTaskIds[index] };
+				});
+				history = history;
 			} finally {
 				if (chatEventEmitter) clearInterval(chatEventEmitter);
 			}
 		}
+		if (!primaryModel || !primaryResponseMessageId) throw new Error($i18n.t('Model not selected'));
 		return {
 			status: 'submitted' as const,
 			chatId: $chatId,
@@ -5383,13 +5486,6 @@
 		initiateOAuthRedirect(tool);
 	};
 
-	const clearDraft = async (chatId: string | null = null) => {
-		if (saveDraftTimeout) {
-			clearTimeout(saveDraftTimeout);
-		}
-		await sessionStorage.removeItem(chatId ? `chat-input-${chatId}` : getNewChatDraftKey());
-	};
-
 	const createdEmptyChatIds = new Set<string>();
 	const cleanedEmptyChatIds = new Set<string>();
 	const isDisposableEmptyChat = (targetId: string | null | undefined): boolean => {
@@ -5953,6 +6049,9 @@
 										askUser={savedAskUserPrompt ?? socketAskUserPrompt}
 										onQueueSendNow={sendQueuedMessageNow}
 										onQueueEdit={editQueuedMessage}
+										onQueueEditStart={startEditingQueuedMessage}
+										onQueueMove={moveQueuedMessage}
+										onSubmitNow={submitNow}
 										onQueueDelete={deleteQueuedMessage}
 										onChange={(data: any) => {
 											if (!$temporaryChatEnabled) {
@@ -5964,7 +6063,6 @@
 											showChatVariablesModal = true;
 										}}
 										on:submit={async (e) => {
-											clearDraft(getDraftChatId());
 											if (e.detail || files.length > 0) {
 												await tick();
 
@@ -6054,6 +6152,9 @@
 										askUser={savedAskUserPrompt ?? socketAskUserPrompt}
 										onQueueSendNow={sendQueuedMessageNow}
 										onQueueEdit={editQueuedMessage}
+										onQueueEditStart={startEditingQueuedMessage}
+										onQueueMove={moveQueuedMessage}
+										onSubmitNow={submitNow}
 										onQueueDelete={deleteQueuedMessage}
 										onChange={(data: any) => {
 											if (!$temporaryChatEnabled) {
@@ -6065,7 +6166,6 @@
 											showChatVariablesModal = true;
 										}}
 										on:submit={async (e) => {
-											clearDraft(getDraftChatId());
 											if (e.detail || files.length > 0) {
 												await tick();
 												submitHandler(withSelectedText(e.detail));
@@ -6113,6 +6213,9 @@
 									askUser={savedAskUserPrompt ?? socketAskUserPrompt}
 									onQueueSendNow={sendQueuedMessageNow}
 									onQueueEdit={editQueuedMessage}
+									onQueueEditStart={startEditingQueuedMessage}
+									onQueueMove={moveQueuedMessage}
+									onSubmitNow={submitNow}
 									onQueueDelete={deleteQueuedMessage}
 									onWebSearchToggle={handleWebSearchToggle}
 									on:chatVariables={() => {
@@ -6124,7 +6227,6 @@
 										}
 									}}
 									on:submit={async (e) => {
-										clearDraft(getDraftChatId());
 										if (e.detail || files.length > 0) {
 											await tick();
 											submitHandler(withSelectedText(e.detail));

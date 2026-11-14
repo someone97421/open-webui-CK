@@ -153,9 +153,28 @@ export const visibleControls = derived(
 );
 
 export const audioQueue = writable<AudioQueue | null>(null);
-export const chatRequestQueues: Writable<
-	Record<string, { id: string; prompt: string; files: any[]; error?: string }[]>
-> = writable({});
+export type ChatQueuedMessage = {
+	id: string;
+	prompt: string;
+	files: any[];
+	sending?: boolean;
+	editing?: boolean;
+	error?: string;
+	delivery?: { taskId: string; messageId: string; inputId: string };
+};
+export const chatRequestQueues: Writable<Record<string, ChatQueuedMessage[]>> = writable({});
+export type ChatDirectInputAttempt = {
+	id: string;
+	chatId: string;
+	taskId: string;
+	messageId: string;
+	prompt: string;
+	files: any[];
+	draft: string;
+	inFlight: boolean;
+};
+export const chatDirectInputAttempts: Writable<Record<string, ChatDirectInputAttempt>> = writable({});
+export const chatRecoveredDrafts: Writable<Record<string, { prompt: string; files: any[] }[]>> = writable({});
 
 export type ChannelQueuedMessage = {
 	id: string;

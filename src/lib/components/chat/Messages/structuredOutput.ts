@@ -57,6 +57,12 @@ export type OutputDisplayItem =
 			text: string;
 	  }
 	| {
+			type: 'user_input';
+			id: string;
+			text: string;
+			files: any[];
+	  }
+	| {
 			type: 'image';
 			id: string;
 			src: string;
@@ -454,6 +460,17 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 				type: 'context_compaction',
 				id: item.id ?? `context-compaction-${index}`,
 				summary: typeof item.summary === 'string' ? item.summary : ''
+			});
+			return;
+		}
+
+		if (item.type === 'open_webui:user_input') {
+			flushDetails();
+			displayItems.push({
+				type: 'user_input',
+				id: item.id ?? `user-input-${index}`,
+				text: typeof item.text === 'string' ? item.text : '',
+				files: Array.isArray(item.files) ? item.files : []
 			});
 			return;
 		}
