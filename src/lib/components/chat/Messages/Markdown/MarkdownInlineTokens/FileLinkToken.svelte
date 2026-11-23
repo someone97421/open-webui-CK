@@ -3,10 +3,10 @@
 	import { getContext, onDestroy } from 'svelte';
 	import { readable, type Readable } from 'svelte/store';
 	import { toast } from 'svelte-sonner';
-	import { settings, terminalServers, user } from '$lib/stores';
+	import { terminalServers, user } from '$lib/stores';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import { getFileById, uploadFile } from '$lib/apis/files';
-	import { joinTerminalPath, resolveTerminalConnection, terminalRequest } from '$lib/apis/terminal';
+	import { joinTerminalPath, resolveTerminalTarget, terminalRequest } from '$lib/apis/terminal';
 	import { createPyodideWorker, getPyodideScope } from '$lib/pyodide/createPyodideWorker';
 	import { fileContentType, type ChatFileReference } from '$lib/utils/chatFiles';
 	import { copyToClipboard } from '$lib/utils';
@@ -72,11 +72,11 @@
 				if ($chatMode && !$chatMode.ready) throw new Error('聊天工作区仍在加载，请稍后重试');
 				const selector = ref.terminalId || $chatMode?.project?.terminal_id;
 				if (selector) {
-					const connection = resolveTerminalConnection(selector, $terminalServers ?? [], $settings?.terminalServers ?? [], localStorage.token);
+					const connection = resolveTerminalTarget(selector, $terminalServers ?? [], localStorage.token, { chatId: targetChatId });
 					if (!connection) throw new Error('文件所属的 Terminal 不可用');
 					let path = ref.path;
 					if (!path.startsWith('/')) {
-						const cwd = await terminalRequest<{ cwd: string }>(connection, targetChatId, '/files/cwd');
+						const cwd = await terminalRequest<{ cwd: string }>(connection, '/files/cwd');
 						path = joinTerminalPath(cwd.cwd, path);
 					}
 					item = { source: 'open_terminal', path, terminal_selector: selector };

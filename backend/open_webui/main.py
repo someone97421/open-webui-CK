@@ -186,6 +186,7 @@ from open_webui.routers import (
     tools,
     users,
     utils,
+    videos,
 )
 from open_webui.routers.retrieval import (
     get_ef,
@@ -201,7 +202,6 @@ from open_webui.socket.main import (
     periodic_session_pool_cleanup,
     periodic_socket_authentication,
     periodic_usage_pool_cleanup,
-    redis_event_listener,
     sio,
 )
 from open_webui.socket.main import (
@@ -253,6 +253,7 @@ from open_webui.utils.chat_variables import (
 )
 from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.headers import get_headers_and_cookies
+from open_webui.utils.images.connections import migrate_legacy_image_config
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.json_response import apply_orjson_http_json
 from open_webui.utils.logger import start_logger
@@ -371,8 +372,6 @@ https://github.com/open-webui/open-webui
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Store reference to main event loop for sync->async calls (e.g., embedding generation)
-    # This allows sync functions to schedule work on the main loop without blocking health checks
     app.state.main_loop = asyncio.get_running_loop()
 
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
@@ -399,6 +398,7 @@ async def lifespan(app: FastAPI):
     await validate_mfa_configuration()
     await initialize_runtime_config(app)
     await migrate_legacy_webhook_config()
+    await migrate_legacy_image_config()
     request = Request(
         {
             'type': 'http',
@@ -441,7 +441,6 @@ async def lifespan(app: FastAPI):
             app.state.redis_task_heartbeat = asyncio.create_task(redis_task_heartbeat(app))
 
     if WEBSOCKET_MANAGER == 'redis':
-        app.state.redis_event_listener = asyncio.create_task(redis_event_listener())
         # socket.io only starts listening on its first connect; event call answers need it earlier
         sio.manager_initialized = True
         sio.manager.initialize()
@@ -538,9 +537,6 @@ async def lifespan(app: FastAPI):
 
     if hasattr(app.state, 'redis_task_heartbeat'):
         app.state.redis_task_heartbeat.cancel()
-
-    if hasattr(app.state, 'redis_event_listener'):
-        app.state.redis_event_listener.cancel()
 
     app.state.periodic_socket_authentication.cancel()
     app.state.periodic_usage_pool_cleanup.cancel()
@@ -826,6 +822,7 @@ app.include_router(openai.router, prefix='/openai', tags=['openai'])
 app.include_router(pipelines.router, prefix='/api/v1/pipelines', tags=['pipelines'])
 app.include_router(tasks.router, prefix='/api/v1/tasks', tags=['tasks'])
 app.include_router(images.router, prefix='/api/v1/images', tags=['images'])
+app.include_router(videos.router, prefix='/api/v1/videos', tags=['videos'])
 
 app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
 app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
@@ -1073,17 +1070,6 @@ async def embeddings(request: Request, form_data: dict, user=Depends(get_verifie
     return await generate_embeddings(request, form_data, user)
 
 
-async def _set_direct_model(request: Request, model_item: dict, user) -> None:
-    model_meta = (model_item.get('info') or {}).get('meta') or {}
-    knowledge_items = model_meta.get('knowledge')
-    if knowledge_items:
-        from open_webui.utils.access_control.files import get_accessible_folder_files
-
-        model_meta['knowledge'] = await get_accessible_folder_files(knowledge_items, user)
-    request.state.direct = True
-    request.state.model = model_item
-
-
 @app.post('/api/chat/completions')
 @app.post('/api/v1/chat/completions')  # Experimental: Compatibility with OpenAI API
 async def chat_completion(
@@ -1096,7 +1082,6 @@ async def chat_completion(
 
     model_id = form_data.get('model', None)
     request.state.model_id = model_id
-    model_item = form_data.pop('model_item', {})
     tasks = form_data.pop('background_tasks', None)
 
 
@@ -1105,44 +1090,40 @@ async def chat_completion(
         model_info = None
         fallback_model = None
         missing_base_model = False
-        if not model_item.get('direct', False):
-            if model_id not in request.app.state.MODELS:
-                raise Exception('Model not found')
+        if model_id not in request.app.state.MODELS:
+            raise Exception('Model not found')
 
-            model = request.app.state.MODELS[model_id]
-            model_info = await Models.get_model_by_id(model_id)
-            missing_base_model = bool(
-                model_info and model_info.base_model_id and model_info.base_model_id not in request.app.state.MODELS
+        model = request.app.state.MODELS[model_id]
+        model_info = await Models.get_model_by_id(model_id)
+        missing_base_model = bool(
+            model_info and model_info.base_model_id and model_info.base_model_id not in request.app.state.MODELS
+        )
+
+        if missing_base_model and ENABLE_CUSTOM_MODEL_FALLBACK:
+            fallback_model_id = next(
+                (
+                    model_id.strip()
+                    for model_id in ((await Config.get('ui.default_models')) or '').split(',')
+                    if model_id.strip()
+                ),
+                None,
             )
+            if fallback_model_id:
+                fallback_model = request.app.state.MODELS.get(fallback_model_id)
 
-            if missing_base_model and ENABLE_CUSTOM_MODEL_FALLBACK:
-                fallback_model_id = next(
-                    (
-                        model_id.strip()
-                        for model_id in ((await Config.get('ui.default_models')) or '').split(',')
-                        if model_id.strip()
-                    ),
-                    None,
+        # Check if user has access to the model
+        if not BYPASS_MODEL_ACCESS_CONTROL and (user.role != 'admin' or not BYPASS_ADMIN_ACCESS_CONTROL):
+            try:
+                access_model_info = (
+                    model_info.model_copy(update={'base_model_id': None})
+                    if fallback_model is not None
+                    else model_info
                 )
-                if fallback_model_id:
-                    fallback_model = request.app.state.MODELS.get(fallback_model_id)
-
-            # Check if user has access to the model
-            if not BYPASS_MODEL_ACCESS_CONTROL and (user.role != 'admin' or not BYPASS_ADMIN_ACCESS_CONTROL):
-                try:
-                    access_model_info = (
-                        model_info.model_copy(update={'base_model_id': None})
-                        if fallback_model is not None
-                        else model_info
-                    )
-                    await check_model_access(user, model, model_info=access_model_info)
-                    if fallback_model is not None:
-                        await check_model_access(user, fallback_model)
-                except Exception as e:
-                    raise e
-        else:
-            model = model_item
-            await _set_direct_model(request, model, user)
+                await check_model_access(user, model, model_info=access_model_info)
+                if fallback_model is not None:
+                    await check_model_access(user, fallback_model)
+            except Exception as e:
+                raise e
 
         # Read before the fallback below can rebind model to a different one.
         model_capabilities = ((model.get('info') or {}).get('meta') or {}).get('capabilities') or {}
@@ -1227,22 +1208,6 @@ async def chat_completion(
 
         chat_variables = normalize_chat_variables(chat_variables)
 
-        # Drop tool_servers if caller lacks features.direct_tool_servers —
-        # mirrors the storage-side strip in user/settings/update.
-        tool_servers = form_data.pop('tool_servers', None)
-        if (
-            tool_servers
-            and user.role != 'admin'
-            and not await has_permission(
-                user.id,
-                'features.direct_tool_servers',
-                await Config.get('user.permissions'),
-            )
-        ):
-            tool_servers = None
-        if tool_servers and not await Config.get('direct.integrations.enable', False):
-            tool_servers = None
-
         automation_id = form_data.pop('automation_id', None)
         from open_webui.utils.tool_permissions import resolve_tool_approval_mode
 
@@ -1252,6 +1217,7 @@ async def chat_completion(
         )
         approval_resume = getattr(request.state, 'tool_approval_resume', None)
         metadata = {
+            'model_id': model_id,
             'tool_approval_resume': approval_resume[2]
             if approval_resume and approval_resume[:2] == (chat_id, form_data.get('assistant_message_id'))
             else None,
@@ -1270,7 +1236,6 @@ async def chat_completion(
             'input_controls': form_data.pop('input_controls', None),
             'filter_ids': form_data.pop('filter_ids', []),
             'tool_ids': form_data.get('tool_ids', None),
-            'tool_servers': tool_servers,
             'files': form_data.get('files', None),
             'features': form_data.get('features', {}),
             'variables': form_data.get('variables', {}),
@@ -1288,7 +1253,6 @@ async def chat_completion(
                 'chat_variables': copy.deepcopy(chat_variables),
             },
             'model': model,
-            'direct': model_item.get('direct', False),
             'params': {
                 'stream_delta_chunk_size': stream_delta_chunk_size,
                 'reasoning_tags': reasoning_tags,
@@ -1430,6 +1394,7 @@ async def chat_completion(
                                 'id': chat_id,
                                 'title': 'New Chat',
                                 'models': [entry['model_id'] for entry in message_ids],
+                                'terminal_id': form_data.get('terminal_id'),
                                 'history': {
                                     'currentId': all_assistant_ids[0] if all_assistant_ids else user_message_id,
                                     'messages': history_messages,
@@ -1577,8 +1542,11 @@ async def chat_completion(
                         chat_fields = {'models': selected_chat_models}
                         if metadata.get('files') is not None:
                             chat_fields['files'] = metadata['files']
-                        await Chats.update_chat_by_id(chat_id, chat_fields, touch=False)
-                        await Chats.update_chat_variables_by_id(chat_id, chat_variables)
+                        # Rewriting the stored chat is slow on long chats; skip it when nothing changed.
+                        if any((chat.chat or {}).get(key) != value for key, value in chat_fields.items()):
+                            await Chats.update_chat_by_id(chat_id, chat_fields, touch=False)
+                        if chat_variables != chat.variables:
+                            await Chats.update_chat_variables_by_id(chat_id, chat_variables)
                     else:
                         tasks = {
                             key: value
@@ -1622,18 +1590,15 @@ async def chat_completion(
                             response_meta.pop('response_ended_at', None)
                             message['meta'] = response_meta
                             message['done'] = False
-                if not metadata.get('direct'):
-                    target = (
-                        model_info
-                        if form_data['model'] == model_id
-                        else await Models.get_model_by_id(form_data['model'])
-                    )
-                    controls = target.params.model_dump().get('model_controls', {}) if target else {}
-                    form_data['params'] = apply_model_controls(
-                        copy.deepcopy(form_data.get('params') or {}),
-                        controls,
-                        model_controls.get(form_data['model'], {}),
-                    )
+                target = (
+                    model_info if form_data['model'] == model_id else await Models.get_model_by_id(form_data['model'])
+                )
+                controls = target.params.model_dump().get('model_controls', {}) if target else {}
+                form_data['params'] = apply_model_controls(
+                    copy.deepcopy(form_data.get('params') or {}),
+                    controls,
+                    model_controls.get(form_data['model'], {}),
+                )
                 ctx = None
                 # Saved chats load the message after approved tool calls run, so their results are kept
                 if metadata.get('assistant_message_id') and not is_saved_chat_id(metadata.get('chat_id')):
@@ -1644,7 +1609,7 @@ async def chat_completion(
                 if paused:
                     return {'status': True, 'chat_id': metadata.get('chat_id'), 'paused': True}
 
-                retry_budget = RetryBudget(1 if metadata.get('direct') else None)
+                retry_budget = RetryBudget()
                 response = await request_with_retry(
                     lambda: chat_completion_handler(request, form_data, user), retry_budget, 'Chat completion request'
                 )
@@ -1777,23 +1742,10 @@ async def chat_completion(
                     and getattr(request.state, 'internal', False) is not True
                     and not await has_active_tasks(request.app.state.redis, chat_id)
                 ):
-                    from open_webui.utils.subagents import process_pending_internal_messages
+                    from open_webui.utils.subagents import get_pending_run, process_pending_internal_messages
 
                     await process_pending_internal_messages(
-                        request,
-                        chat_id,
-                        user.id,
-                        {
-                            'model_id': metadata.get('model_id') or form_data.get('model'),
-                            'session_id': metadata.get('session_id'),
-                            'tool_ids': metadata.get('tool_ids') or [],
-                            'skill_ids': metadata.get('skill_ids') or [],
-                            'chat_context': metadata.get('chat_context'),
-                            'filter_ids': metadata.get('filter_ids') or [],
-                            'terminal_id': metadata.get('terminal_id'),
-                            'features': metadata.get('features') or {},
-                            'variables': metadata.get('variables') or {},
-                        },
+                        request, chat_id, user.id, get_pending_run(metadata, form_data.get('model'))
                     )
             except Exception:
                 log.exception('Failed to process pending internal messages for chat %s', metadata.get('chat_id'))
@@ -1817,6 +1769,7 @@ async def chat_completion(
             # Per-model metadata: own message_id + model
             per_model_metadata = {
                 **metadata,
+                'model_id': entry['model_id'],
                 'chat_context': copy.deepcopy(metadata['chat_context']),
                 'message_id': assistant_message_id,
                 'task_id': str(uuid4()),
@@ -2130,11 +2083,6 @@ async def chat_completed(request: Request, form_data: dict, user=Depends(get_ver
     await verify_chat_ownership(form_data.get('chat_id'), user)
 
     try:
-        model_item = form_data.pop('model_item', {})
-
-        if model_item.get('direct', False):
-            await _set_direct_model(request, model_item, user)
-
         return await chat_completed_handler(request, form_data, user)
     except Exception as e:
         raise HTTPException(
@@ -2148,11 +2096,6 @@ async def chat_action(request: Request, action_id: str, form_data: dict, user=De
     await verify_chat_ownership(form_data.get('chat_id'), user)
 
     try:
-        model_item = form_data.pop('model_item', {})
-
-        if model_item.get('direct', False):
-            await _set_direct_model(request, model_item, user)
-
         return await chat_action_handler(request, action_id, form_data, user)
     except Exception as e:
         raise HTTPException(
@@ -2389,8 +2332,6 @@ async def get_app_config(request: Request):
         'ui.enable_login_form',
         'auth.enable_api_keys',
         'ui.enable_password_change_form',
-        'direct.enable',
-        'direct.integrations.enable',
         'terminal_server.connections',
         'folders.enable',
         'folders.max_file_count',
@@ -2411,6 +2352,7 @@ async def get_app_config(request: Request):
         'code_execution.enable',
         'code_interpreter.enable',
         'image_generation.enable',
+        'video_generation.enable',
         'task.autocomplete.enable',
         'task.title.enable',
         'task.follow_up.enable',
@@ -2496,9 +2438,6 @@ async def get_app_config(request: Request):
                     'enable_pyodide_file_persistence': ENABLE_PYODIDE_FILE_PERSISTENCE,
                     'enable_public_active_users_count': ENABLE_PUBLIC_ACTIVE_USERS_COUNT,
                     'enable_easter_eggs': ENABLE_EASTER_EGGS,
-                    'enable_direct_connections': config.get('direct.enable'),
-                    'enable_direct_integrations': ENABLE_TOOL_SERVERS
-                    and config.get('direct.integrations.enable', False),
                     'enable_plugins': ENABLE_PLUGINS,
                     'enable_tools': ENABLE_TOOLS,
                     'enable_functions': ENABLE_FUNCTIONS,
@@ -2529,6 +2468,7 @@ async def get_app_config(request: Request):
                     'enable_code_execution': config.get('code_execution.enable'),
                     'enable_code_interpreter': config.get('code_interpreter.enable'),
                     'enable_image_generation': config.get('image_generation.enable'),
+                    'enable_video_generation': config.get('video_generation.enable'),
                     'enable_autocomplete_generation': config.get('task.autocomplete.enable'),
                     'enable_title_generation': config.get('task.title.enable'),
                     'enable_follow_up_generation': config.get('task.follow_up.enable'),

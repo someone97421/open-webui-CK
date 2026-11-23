@@ -40,10 +40,7 @@ async def terminal_package_request(request, user, terminal_id, *, project_id=Non
     from open_webui.models.groups import Groups
     from open_webui.utils.access_control import has_connection_access
     from open_webui.utils.terminal_identity import terminal_identity_headers
-    from open_webui.utils.terminals import (
-        TERMINAL_CONTEXT_HEADER, get_terminal_server_url, terminal_context_available,
-        terminal_context_config, terminal_context_id,
-    )
+    from open_webui.utils.terminals import get_terminal_server_url, is_terminal_orchestrator
     from open_webui.utils.tools import build_tool_server_headers
 
     if not ENABLE_TOOL_SERVERS:
@@ -56,20 +53,14 @@ async def terminal_package_request(request, user, terminal_id, *, project_id=Non
     else:
         connections = await Config.get('terminal_server.connections', []) or []
         connection = next((item for item in connections if item.get('id') == terminal_id), None)
-        if not connection or not connection.get('enabled', True) or not terminal_context_available(connection, 'chat'):
+        if not connection or not connection.get('enabled', True) or is_terminal_orchestrator(connection):
             raise HTTPException(503, 'Terminal 不可用或尚未配置')
         groups = {group.id for group in await Groups.get_groups_by_member_id(user.id, include_inherited=True)}
         if not await has_connection_access(user, connection, groups):
             raise HTTPException(403, '无权访问该 Terminal')
         metadata = {'chat_id': chat_id, 'terminal_id': terminal_id}
-        context_id = terminal_context_id(connection, metadata)
-        config = terminal_context_config(connection, 'chat')
-        if isinstance(config, dict) and config.get('context_id') == 'chat_id' and not context_id:
-            raise HTTPException(400, '该 Terminal 需要有效聊天上下文')
         headers, cookies = await build_tool_server_headers(connection, request, user, metadata=metadata)
         headers = await terminal_identity_headers(request, connection, user, chat_id, headers)
-        if context_id:
-            headers[TERMINAL_CONTEXT_HEADER] = context_id
     headers = {key: value for key, value in headers.items() if key.lower() != 'content-type'}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_TERMINAL), trust_env=True) as session:

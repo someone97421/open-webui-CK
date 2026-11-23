@@ -2,7 +2,7 @@
 	import { getToolSpecs } from '$lib/apis/tools';
 	import { resolveLocalizedResource } from '$lib/utils/localizedContent';
 	import { getContext } from 'svelte';
-	import { toolServers, tools } from '$lib/stores';
+	import { tools } from '$lib/stores';
 	import { readable, type Readable } from 'svelte/store';
 	import { toolAvailable, defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
 	const attachmentPolicy = getContext<Readable<AttachmentPolicy>>('attachmentPolicy') ?? readable(defaultAttachmentPolicy);
@@ -50,13 +50,7 @@
 
 	$: selectedTools = (($tools ?? []) as any[]).filter((tool) => selectedToolIds.includes(tool.id) && toolAvailable(tool, $attachmentPolicy.capabilities));
 
-	$: selectedToolServers = (($toolServers ?? []) as any[]).filter((server, idx) =>
-		selectedToolIds.some((id) => {
-			if (!id.startsWith('direct_server:')) return false;
-			const serverId = id.slice('direct_server:'.length);
-			return !isNaN(parseInt(serverId)) ? parseInt(serverId) === idx : serverId === server?.id;
-		})
-	);
+	const selectedToolServers: any[] = [];
 
 	const i18n = getContext<any>('i18n');
 

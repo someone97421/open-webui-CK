@@ -1,18 +1,10 @@
 <script lang="ts">
+	import { resolveTerminalTarget, type TerminalTarget } from '$lib/apis/terminal';
 	import Fuse from 'fuse.js';
 	import { getContext, onDestroy, onMount, tick } from 'svelte';
 	import { readable, type Readable } from 'svelte/store';
 
-	import {
-		chatId as activeChatId,
-		folders,
-		models,
-		selectedTerminalId,
-		settings,
-		terminalServers,
-		temporaryChatEnabled,
-		user
-	} from '$lib/stores';
+	import { folders, terminalServers, user } from '$lib/stores';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import { getFolders } from '$lib/apis/folders';
 	import { searchKnowledgeBases, searchKnowledgeFiles } from '$lib/apis/knowledge';
@@ -33,6 +25,9 @@
 	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
 	import Youtube from '$lib/components/icons/Youtube.svelte';
 	import { toast } from 'svelte-sonner';
+	import { getChatContext } from '$lib/components/chat/context';
+
+	const { chatId: activeChatId, models, temporary } = getChatContext();
 
 	const i18n = getContext<any>('i18n');
 	const ensureTerminalChat = getContext<((history?: any) => Promise<string | null>) | undefined>('ensureTerminalChat');
@@ -41,6 +36,8 @@
 	let filesystemSearch = 0;
 
 	export let query = '';
+	export let selectedTerminalId: Readable<string | null>;
+	export let modelId: string | null = null;
 	export let onSelect: (e: any) => void = () => {};
 	export let fileUploadEnabled: boolean = true;
 
@@ -132,7 +129,7 @@
 	};
 
 	const getFilesystemItems = async (
-		terminal: { url: string; key: string } | null,
+		terminal: TerminalTarget | null,
 		signal: AbortSignal
 	) => {
 		const version = ++filesystemSearch;
@@ -149,13 +146,11 @@
 		if (disposed || version !== filesystemSearch || query !== searchQuery ||
 			terminalId !== $selectedTerminalId || !sessionId) return;
 		const res = await searchFiles(
-			terminal.url,
-			terminal.key,
+			{ ...terminal, context: { ...terminal.context, chatId: sessionId } },
 			searchQuery,
 			'.',
 			20,
 			'any',
-			sessionId || undefined,
 			localStorage.getItem('fileNav:showHidden') === 'true',
 			signal
 		).catch(() => null);
@@ -171,7 +166,7 @@
 
 	const chatContext = (terminal: any) => terminal?.contexts?.chat ?? {};
 
-	const getSelectedTerminal = (): { url: string; key: string } | null => {
+	const getSelectedTerminal = (): TerminalTarget | null => {
 		if (!$selectedTerminalId || !$attachmentPolicy.terminalAvailable) return null;
 
 		const systemTerminal = ($terminalServers ?? []).find(
@@ -181,20 +176,19 @@
 		if (systemTerminal) {
 			if (
 				systemChatContext === false ||
-				(($temporaryChatEnabled || isTemporaryChatId($activeChatId)) &&
-					systemChatContext?.context_id === 'chat_id' &&
+				(($temporary || isTemporaryChatId($activeChatId)) &&
+					(systemChatContext?.context_id === 'chat_id' || systemTerminal.scope === 'chat') &&
 					systemTerminal.features?.workspace_isolation !== true)
 			) {
 				return null;
 			}
 
-			return { url: systemTerminal.url, key: localStorage.token };
+			return resolveTerminalTarget($selectedTerminalId, $terminalServers ?? [], localStorage.token, {
+				chatId: $activeChatId || null, modelId
+			});
 		}
 
-		const directTerminal = ($settings?.terminalServers ?? []).find(
-			(t: any) => t.url === $selectedTerminalId && t.enabled
-		);
-		return directTerminal?.url ? { url: directTerminal.url, key: directTerminal.key ?? '' } : null;
+		return null;
 	};
 
 	$: folderItems = (($folders ?? []) as any[])
@@ -304,7 +298,7 @@
 				{#if item?.type === 'folder'}
 					{$i18n.t('Folders')}
 				{:else if item?.type === 'collection'}
-					{$i18n.t('Collections')}
+					{$i18n.t('Knowledge')}
 				{:else if item?.type === 'file'}
 					{$i18n.t('Files')}
 				{:else if item?.type === 'filesystem'}
@@ -337,7 +331,7 @@
 							: item?.type === 'file'
 								? `${item?.collection?.name} > ${$i18n.t('File')}`
 								: item?.type === 'collection'
-									? $i18n.t('Collection')
+									? $i18n.t('Knowledge Base')
 									: item?.type === 'youtube'
 										? $i18n.t('YouTube')
 										: item?.type === 'web'

@@ -1,4 +1,7 @@
 <script lang="ts">
+	import { getPageContext, onTabLeave } from '$lib/utils/page';
+	const { goto } = getPageContext();
+
 	import Comments from '$lib/components/comments/Comments.svelte';
 	import type { CommentsRequest } from '$lib/components/comments/CommentsPanel.svelte';
 	let comments: CommentsRequest | null = null;
@@ -6,7 +9,7 @@
 	import ModelSettingsLabel from './ModelSettingsLabel.svelte';
 	import { toast } from 'svelte-sonner';
 	import { v4 as uuidv4 } from 'uuid';
-	import { beforeNavigate, goto } from '$app/navigation';
+	import { beforeNavigate } from '$app/navigation';
 	import { getModels } from '$lib/apis';
 	import ModelHistory from './ModelHistory.svelte';
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
@@ -60,6 +63,8 @@
 	import ProviderDetails from './ProviderDetails.svelte';
 	import LanguageModeSelect from '$lib/components/common/LanguageModeSelect.svelte';
 	import TerminalSelector from './TerminalSelector.svelte';
+	import ImageModelSelector from './ImageModelSelector.svelte';
+	import VideoModelSelector from './VideoModelSelector.svelte';
 	import TTSVoiceInput from './TTSVoiceInput.svelte';
 	import VoiceAvatarSettings from './VoiceAvatarSettings.svelte';
 	import Photo from '$lib/components/icons/Photo.svelte';
@@ -113,6 +118,14 @@
 		afterDiscard = action;
 		showDiscard = true;
 	};
+	let cancelDiscard: (() => void) | null = null;
+	onTabLeave(() => {
+		if (readOnly || !dirty || allowNavigation) return true;
+		return new Promise<boolean>((resolve) => {
+			cancelDiscard = () => resolve(false);
+			discardThen(() => resolve(true));
+		});
+	});
 	beforeNavigate(({ cancel, to, willUnload }) => {
 		if (readOnly || !dirty || allowNavigation) return;
 		cancel();
@@ -249,8 +262,9 @@
 	let actionIds = [];
 	let accessGrants: any[] = [];
 	let terminalId = '';
-	$: hasTerminal =
-		$config?.features?.enable_terminal_servers || $config?.features?.enable_direct_integrations;
+	let imageModelId = '';
+	let videoModelId = '';
+	$: hasTerminal = $config?.features?.enable_terminal_servers;
 	let tts = { voice: '' };
 	let voice = { voice: '' };
 	export let suggestionTags: { name: string }[] = [];
@@ -361,7 +375,7 @@
 						(edit && baseModel.id === info.base_model_id)) &&
 					(!baseModel?.preset || (edit && baseModel.id === info.base_model_id)) &&
 					baseModel?.owned_by !== 'arena' &&
-					!(baseModel?.direct ?? false) &&
+					!(baseModel?.owner_id ?? false) &&
 					(includeHidden ||
 						!(baseModel?.info?.meta?.hidden ?? false) ||
 						baseModel.id === info.base_model_id)
@@ -503,12 +517,24 @@
 			delete modelInfo.meta.i18n;
 		}
 
-		if (terminalId) {
+		if (terminalId || defaultMeta.terminalId) {
 			modelInfo.meta.terminalId = terminalId;
 		} else {
 			if (modelInfo.meta.terminalId) {
 				delete modelInfo.meta.terminalId;
 			}
+		}
+
+		if (imageModelId || defaultMeta.imageModelId) {
+			modelInfo.meta.imageModelId = imageModelId;
+		} else if (modelInfo.meta.imageModelId) {
+			delete modelInfo.meta.imageModelId;
+		}
+
+		if (videoModelId || defaultMeta.videoModelId) {
+			modelInfo.meta.videoModelId = videoModelId;
+		} else if (modelInfo.meta.videoModelId) {
+			delete modelInfo.meta.videoModelId;
 		}
 
 		if (voice.voice.trim()) modelInfo.meta.voice = { voice: voice.voice.trim() };
@@ -741,7 +767,9 @@
 			};
 			defaultFeatureIds = model?.meta?.defaultFeatureIds ?? defaultMeta.defaultFeatureIds ?? [];
 			builtinTools = model?.meta?.builtinTools ?? defaultMeta.builtinTools ?? {};
-			terminalId = model?.meta?.terminalId ?? '';
+			terminalId = model?.meta?.terminalId ?? defaultMeta.terminalId ?? '';
+			imageModelId = model?.meta?.imageModelId ?? defaultMeta.imageModelId ?? '';
+			videoModelId = model?.meta?.videoModelId ?? defaultMeta.videoModelId ?? '';
 			tts = { voice: model?.meta?.tts?.voice ?? '' };
 			voice = { voice: model?.meta?.voice?.voice ?? '' };
 
@@ -757,14 +785,7 @@
 	const productionHandler = async (value: any) => {
 		await loadModel(value);
 		try {
-			models.set(
-				await getModels(
-					localStorage.token,
-					$config?.features?.enable_direct_connections
-						? ($settings?.directConnections ?? null)
-						: null
-				)
-			);
+			models.set(await getModels(localStorage.token));
 		} catch (error) {
 			toast.error(`${error}`);
 		}
@@ -795,6 +816,9 @@
 		defaultFeatureIds = defaultMeta.defaultFeatureIds ?? [];
 		builtinTools = defaultMeta.builtinTools ?? {};
 		toolIds = defaultMeta.toolIds ?? [];
+		terminalId = defaultMeta.terminalId ?? '';
+		imageModelId = defaultMeta.imageModelId ?? '';
+		videoModelId = defaultMeta.videoModelId ?? '';
 
 		// Scroll to top 'workspace-container' element
 		const workspaceContainer = document.getElementById('workspace-container');
@@ -853,6 +877,11 @@
 		/>
 		<ConfirmDialog
 			bind:show={showDiscard}
+			on:cancel={() => {
+				cancelDiscard?.();
+				cancelDiscard = null;
+				afterDiscard = null;
+			}}
 			title={$i18n.t('Discard unsaved changes?')}
 			message={$i18n.t('Your unsaved changes will be lost.')}
 			on:confirm={() => {
@@ -1684,7 +1713,7 @@
 													id="model-subagents"
 													label={$i18n.t('Models')}
 													items={($baseModels ?? [])
-														.filter((model) => !('direct' in model && model.direct))
+														.filter((model) => !('owner_id' in model && model.owner_id))
 														.map((model) => ({
 															id: model.id,
 															name: model.name,
@@ -1778,6 +1807,12 @@
 										</ModelSettingsSection>
 										{#if capabilities.terminal && hasTerminal}
 											<TerminalSelector bind:terminalId />
+										{/if}
+										{#if capabilities.image_generation && $config?.features?.enable_image_generation}
+											<ImageModelSelector bind:imageModelId />
+										{/if}
+										{#if capabilities.video_generation && $config?.features?.enable_video_generation}
+											<VideoModelSelector bind:videoModelId />
 										{/if}
 									</div>
 								</fieldset>

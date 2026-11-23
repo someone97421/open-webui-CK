@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolveTerminalTarget } from '$lib/apis/terminal';
 	// Keep keys in nested template expressions visible to i18next-parser.
 	// $i18n.t("Terminal unavailable");
 	// $i18n.t("No preview available");
@@ -8,7 +9,6 @@
 	import type { i18n as i18nType } from 'i18next';
 	import { toast } from 'svelte-sonner';
 	import {
-		settings,
 		selectedTerminalId,
 		showTabs,
 		showFileNavPath,
@@ -25,6 +25,7 @@
 	export let chatId = '';
 	export let localBlob: Blob | null = null;
 	export let attachment = false;
+	export let modelId: string | null = null;
 
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
@@ -46,12 +47,10 @@
 	let fileModelData: ArrayBuffer | null = null;
 	let fileDocxData: ArrayBuffer | null = null;
 	let fileContent: string | null = null;
-	let fileOfficeHtml: string | null = null;
 	let fileOfficeSlides: string[] | null = null;
 	let currentSlide = 0;
-	let excelSheetNames: string[] = [];
 	let selectedExcelSheet = '';
-	let excelWorkbook: any = null;
+	let excelWorkbook: import('xlsx').WorkBook | null = null;
 
 	const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'ico', 'avif']);
 	const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'ogv', 'avi', 'mkv']);
@@ -69,14 +68,17 @@
 	$: name = String(item?.name || path.split('/').filter(Boolean).at(-1) || 'file');
 	$: targetPage = normalizeDocumentTargetPage(item?.page);
 	$: selector = item?.terminal_selector;
-	$: terminal = resolveTerminal(selector, $terminalServers ?? [], $settings);
+	$: terminal =
+		selector
+			? resolveTerminalTarget(selector, $terminalServers ?? [], localStorage.token, {
+					chatId: effectiveChatId,
+					modelId: item?.model_id ?? modelId
+				})
+			: null;
 	$: unavailable = !terminal && !fileId && !localBlob;
-	$: previewKey = localBlob ? `local:${path}:${effectiveChatId}` : fileId || (terminal ? `${terminal.url}|${terminal.key}|${path}|${effectiveChatId}` : '');
-	$: isPerChatTerminal = ($terminalServers ?? []).some((server: any) => server.id === selector);
-	$: previewBaseUrl =
-		terminal && isPerChatTerminal && effectiveChatId
-			? `${terminal.url}/chats/${encodeURIComponent(effectiveChatId)}`
-			: (terminal?.url ?? '');
+	$: previewKey =
+		localBlob ? `local:${path}:${effectiveChatId}` : fileId || (terminal ? `${terminal.baseUrl}|${terminal.key}|${terminal.context.modelId}|${path}|${effectiveChatId}` : '');
+
 	$: previewClass = isImage(path)
 		? 'h-[22rem]'
 		: isPdf(path) ||
@@ -115,24 +117,6 @@
 
 	const t = (key: string, vars?: Record<string, unknown>) => $i18n?.t?.(key, vars) ?? key;
 
-	function resolveTerminal(fileSelector: string, servers: any[], preferences: any): { url: string; key: string } | null {
-		if (!fileSelector) return null;
-
-		const systemTerminal = servers.find((server: any) => server.id === fileSelector);
-		if (systemTerminal?.url) {
-			return { url: systemTerminal.url, key: localStorage.token };
-		}
-
-		const directTerminal = (preferences?.terminalServers ?? []).find(
-			(server: any) => server.url === fileSelector && server.enabled
-		);
-		if (directTerminal?.url) {
-			return { url: directTerminal.url, key: directTerminal.key ?? '' };
-		}
-
-		return null;
-	}
-
 	function clearPreview() {
 		for (const url of objectUrls) URL.revokeObjectURL(url);
 		objectUrls = [];
@@ -144,10 +128,8 @@
 		fileModelData = null;
 		fileDocxData = null;
 		fileContent = null;
-		fileOfficeHtml = null;
 		fileOfficeSlides = null;
 		currentSlide = 0;
-		excelSheetNames = [];
 		selectedExcelSheet = '';
 		excelWorkbook = null;
 	}
@@ -161,19 +143,7 @@
 			return data ? { blob: new Blob([data], { type: contentType }), filename } : null;
 		}
 		if (!terminal) return null;
-		return downloadFileBlob(terminal.url, terminal.key, path, effectiveChatId || undefined);
-	}
-
-	async function loadExcelSheet(sheet: string, generation = previewGeneration) {
-		const workbook = excelWorkbook;
-		if (!workbook) return;
-		selectedExcelSheet = sheet;
-		const current = () => !destroyed && generation === previewGeneration && workbook === excelWorkbook && sheet === selectedExcelSheet;
-		const { excelToTable } = await import('$lib/utils/excelToTable');
-		if (!current()) return;
-		const result = await excelToTable(workbook.Sheets[sheet]);
-		const DOMPurify = (await import('dompurify')).default;
-		if (current()) fileOfficeHtml = DOMPurify.sanitize(result.html, { ADD_ATTR: ['target'] });
+		return downloadFileBlob(terminal, path);
 	}
 
 	async function loadPreview(key: string) {
@@ -207,7 +177,7 @@
 				const ext = getExt(path);
 				if (ext === 'docx' || ext === 'pptx') {
 					const preview = terminal
-						? await downloadFilePreview(terminal.url, terminal.key, path, effectiveChatId || undefined)
+						? await downloadFilePreview(terminal, path)
 						: null;
 					if (!current()) return;
 					if (preview) {
@@ -236,8 +206,7 @@
 					const workbook = await readExcelWorkbook(arrayBuffer);
 					if (!current()) return;
 					excelWorkbook = workbook;
-					excelSheetNames = excelWorkbook.SheetNames;
-					if (excelSheetNames.length) await loadExcelSheet(excelSheetNames[0], generation);
+					selectedExcelSheet = workbook.SheetNames[0] ?? '';
 				}
 			} else if (fileId || localBlob) {
 				const result = await blobForPreview();
@@ -248,7 +217,7 @@
 					if (current()) fileContent = content;
 				}
 			} else if (terminal && (!attachment || /^(?:text\/|application\/(?:json|xml|javascript))/.test(item?.content_type ?? item?.mime_type ?? '') || /\.(?:txt|log|md|markdown|csv|tsv|json|html?|svg|xml|ya?ml|py|js|ts|css|sh|sql|ipynb)$/i.test(path))) {
-				const content = await readFile(terminal.url, terminal.key, path, effectiveChatId || undefined);
+				const content = await readFile(terminal, path);
 				if (current()) fileContent = content;
 			}
 		} catch (e) {
@@ -355,19 +324,16 @@
 					{fileModelData}
 					{fileDocxData}
 					{fileContent}
-					baseUrl={fileId ? '' : previewBaseUrl}
+					target={fileId ? null : terminal}
 					chatId={effectiveChatId}
-					apiKey={terminal?.key ?? ''}
-					{fileOfficeHtml}
+					{excelWorkbook}
 					{fileOfficeSlides}
 					{currentSlide}
 					{targetPage}
-					{excelSheetNames}
-					{selectedExcelSheet}
-					onSheetChange={(sheet) => loadExcelSheet(sheet)}
+					bind:selectedExcelSheet
 					readOnly={true}
 				/>
-				{#if !loading && fileImageUrl === null && fileVideoUrl === null && fileAudioUrl === null && filePdfData === null && fileSqliteData === null && fileModelData === null && fileDocxData === null && fileContent === null && fileOfficeHtml === null && fileOfficeSlides === null}
+				{#if !loading && fileImageUrl === null && fileVideoUrl === null && fileAudioUrl === null && filePdfData === null && fileSqliteData === null && fileModelData === null && fileDocxData === null && fileContent === null && excelWorkbook === null && fileOfficeSlides === null}
 					<div
 						class="flex h-full items-center justify-center px-3 text-xs text-gray-500 dark:text-gray-400"
 					>

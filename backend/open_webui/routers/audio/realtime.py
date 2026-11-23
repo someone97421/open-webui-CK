@@ -405,7 +405,7 @@ async def realtime_call(ws: WebSocket):
         if not ws.app.state.MODELS:
             await get_all_models(ws, user=user)
         model = ws.app.state.MODELS.get(model_id)
-        if not model or model.get('direct'):
+        if not model:
             raise ValueError('Bridge requires a server-configured chat model')
         model_info = await Models.get_model_by_id(model_id)
         if not BYPASS_MODEL_ACCESS_CONTROL and (user.role != 'admin' or not BYPASS_ADMIN_ACCESS_CONTROL):

@@ -62,7 +62,7 @@ async def require_project_access(user, project, *, writable=True, allow_archived
 
 async def validate_project_terminal(request, user, terminal_id: str) -> dict:
     from open_webui.utils.tools import build_tool_server_headers
-    from open_webui.utils.terminals import get_terminal_server_url, is_terminal_orchestrator, terminal_context_available
+    from open_webui.utils.terminals import get_terminal_server_url, is_terminal_orchestrator
 
     connections = await Config.get('terminal_server.connections', []) or []
     connection = next((item for item in connections if item.get('id') == terminal_id), None)
@@ -72,7 +72,7 @@ async def validate_project_terminal(request, user, terminal_id: str) -> dict:
     if not await has_connection_access(user, connection, group_ids):
         raise HTTPException(status_code=403, detail='无权使用项目绑定的 Terminal')
     if (
-        is_terminal_orchestrator(connection) or connection.get('policy_id') or not terminal_context_available(connection, 'chat')
+        is_terminal_orchestrator(connection) or connection.get('policy_id')
         or connection.get('auth_type', 'bearer') != 'bearer'
         or not normalize_bearer_token(connection.get('key', ''))
     ):

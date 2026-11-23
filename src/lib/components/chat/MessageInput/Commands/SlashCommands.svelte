@@ -17,6 +17,7 @@
 	import Plus from '$lib/components/icons/Plus.svelte';
 	import Sparkles from '$lib/components/icons/Sparkles.svelte';
 
+
 	const i18n: any = getContext('i18n');
 
 	export let query = '';

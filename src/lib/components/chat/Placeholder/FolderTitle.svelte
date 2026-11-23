@@ -2,8 +2,6 @@
 	import { getContext } from 'svelte';
 	const i18n = getContext('i18n');
 
-	import DOMPurify from 'dompurify';
-
 	import fileSaver from 'file-saver';
 	const { saveAs } = fileSaver;
 
@@ -11,34 +9,42 @@
 
 	import { selectedFolder, chatId, user } from '$lib/stores';
 	import { goto } from '$app/navigation';
+	import {
+		loadFolderDetails,
+		updateFolderDetails,
+		removeFolderState,
+		type FolderDetails
+	} from '$lib/stores/folderStates';
 
 	import {
 		deleteFolderById,
-		getFolderById,
 		updateFolderById,
-		createNewFolder
+		createNewFolder,
+		markFolderChatsReadById
 	} from '$lib/apis/folders';
 	import { getChatsByFolderId } from '$lib/apis/chats';
 	import { getFolderProject, isArchivedProject, isProjectFolder } from '$lib/utils/projects';
+	import { refreshSidebar } from '$lib/stores/chatList';
 
 	import FolderModal from '$lib/components/layout/Sidebar/Folders/FolderModal.svelte';
+	import FolderShareModal from '$lib/components/layout/Sidebar/Folders/FolderShareModal.svelte';
 
-	import Folder from '$lib/components/icons/Folder.svelte';
-	import XMark from '$lib/components/icons/XMark.svelte';
 	import FolderMenu from '$lib/components/layout/Sidebar/Folders/FolderMenu.svelte';
 	import EllipsisHorizontal from '$lib/components/icons/EllipsisHorizontal.svelte';
 	import DeleteConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
-	import Emoji from '$lib/components/common/Emoji.svelte';
-	import EmojiPicker from '$lib/components/common/EmojiPicker.svelte';
 
-	export let folder = null;
+	export let folder: FolderDetails | null = null;
 	export let readOnly: boolean = false;
+	export let onNewChat: () => void = () => {};
+	export let folderTabActions: import('svelte').Snippet | undefined = undefined;
+	$: folderTabActions = renderFolderActions;
 
 	export let onUpdate: Function = (folderId) => {};
 	export let onDelete: Function = (folderId) => {};
 
-	let showFolderModal = false;
+	export let showFolderModal = false;
 	let showCreateSubFolderModal = false;
+	let showShareModal = false;
 	let showDeleteConfirm = false;
 	let showArchiveConfirm = false;
 	let deleteFolderContents = true;
@@ -46,81 +52,61 @@
 	$: projectArchived = isArchivedProject(folder);
 
 	const updateHandler = async ({ name, meta, data }) => {
+		const targetFolder = folder;
+		if (!targetFolder) return;
 		name = name?.trim();
 		if (!name) {
 			toast.error($i18n.t('Folder name cannot be empty.'));
 			return null;
 		}
 
-		const currentName = folder.name;
-		folder.name = name;
-		const res = await updateFolderById(localStorage.token, folder.id, {
+		const currentName = targetFolder.name;
+
+		targetFolder.name = name;
+
+		const res = await updateFolderById(localStorage.token, targetFolder.id, {
 			name,
 			...(meta ? { meta } : {}),
 			...(data ? { data } : {})
 		}).catch((error) => {
 			toast.error(`${error}`);
-			folder.name = currentName;
+
+			targetFolder.name = currentName;
 			return null;
 		});
 		if (!res) return null;
 
-		folder.name = name;
-		if (data) folder.data = data;
+		updateFolderDetails(targetFolder.id, res);
 		toast.success($i18n.t('Folder updated successfully'));
-
-		const latest = await getFolderById(localStorage.token, folder.id).catch((error) => {
+		const latest = await loadFolderDetails(localStorage.token, targetFolder.id, true).catch((error) => {
 			toast.error(`${error}`);
 			return null;
 		});
-		const updatedFolder = { ...folder, ...res, ...latest };
-		await selectedFolder.set(updatedFolder);
+		const updatedFolder = { ...targetFolder, ...res, ...latest };
+		if ($selectedFolder?.id === targetFolder.id) selectedFolder.set(updatedFolder);
 		onUpdate(updatedFolder);
 		return updatedFolder;
 	};
 
-	const updateIconHandler = async (iconName) => {
-		const res = await updateFolderById(localStorage.token, folder.id, {
-			meta: {
-				icon: iconName ?? ''
-			}
-		}).catch((error) => {
-			toast.error(`${error}`);
-			return null;
-		});
-
-		if (res) {
-			folder.meta = { ...folder.meta, icon: iconName ?? '' };
-
-			toast.success($i18n.t('Folder updated successfully'));
-
-			const _folder = await getFolderById(localStorage.token, folder.id).catch((error) => {
-				toast.error(`${error}`);
-				return null;
-			});
-
-			const updatedFolder = { ...folder, ..._folder };
-			await selectedFolder.set(updatedFolder);
-			onUpdate(updatedFolder);
-		}
-	};
-
-	const setProjectArchived = async (archived) => {
-		const latest = await getFolderById(localStorage.token, folder.id).catch((error) => {
+	const setProjectArchived = async (archived: boolean) => {
+		const targetFolder = folder;
+		if (!targetFolder) return null;
+		const latest = await loadFolderDetails(localStorage.token, targetFolder.id, true).catch((error) => {
 			toast.error(`${error}`);
 			return null;
 		});
 		const project = getFolderProject(latest);
 		if (!latest || !project) return null;
 		const data = { ...latest.data, project: { ...project, archived } };
-		const res = await updateFolderById(localStorage.token, folder.id, { data }).catch((error) => {
+		const res = await updateFolderById(localStorage.token, targetFolder.id, { data }).catch((error) => {
 			toast.error(`${error}`);
 			return null;
 		});
 		if (!res) return null;
 		const updatedFolder = { ...latest, ...res, data };
-		folder = updatedFolder;
-		selectedFolder.set(updatedFolder);
+		updateFolderDetails(targetFolder.id, updatedFolder);
+		if (folder?.id === targetFolder.id) folder = updatedFolder;
+		if ($selectedFolder?.id === targetFolder.id) selectedFolder.set(updatedFolder);
 		toast.success(archived ? '项目已归档，会话和文件已保留' : '项目已恢复');
 		if (archived) onDelete(updatedFolder);
 		else onUpdate(updatedFolder);
@@ -129,6 +115,7 @@
 
 	const deleteHandler = async () => {
 		const deletedFolder = folder;
+		if (!deletedFolder) return;
 		const deletingProject = isProject;
 		const res = await deleteFolderById(localStorage.token, deletedFolder.id, deletingProject || deleteFolderContents).catch(
 			(error) => {
@@ -138,6 +125,7 @@
 		);
 
 		if (res) {
+			removeFolderState(deletedFolder.id);
 			const wasSelectedProject = deletingProject && $selectedFolder?.id === deletedFolder.id;
 			toast.success(deletingProject ? '项目、会话和工作区文件已删除' : $i18n.t('Folder deleted successfully'));
 			onDelete(deletedFolder);
@@ -149,7 +137,19 @@
 		}
 	};
 
+	const markAllReadHandler = async () => {
+		if (!folder) return;
+		const res = await markFolderChatsReadById(localStorage.token, folder.id).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		if (!res) return;
+
+		await refreshSidebar(localStorage.token);
+	};
+
 	const exportHandler = async () => {
+		if (!folder) return;
 		const chats = await getChatsByFolderId(localStorage.token, folder.id).catch((error) => {
 			toast.error(`${error}`);
 			return null;
@@ -186,8 +186,48 @@
 			toast.success($i18n.t('Folder created successfully'));
 			onUpdate();
 		}
+		return res;
 	};
 </script>
+
+{#snippet renderFolderActions()}
+	{#if folder && (!readOnly || (isProject && projectArchived && (folder.user_id === $user?.id || $user?.role === 'admin')))}
+		<div class="flex shrink-0 items-center">
+			<FolderMenu
+				align="end"
+				{onNewChat}
+				{isProject}
+				{projectArchived}
+				canDelete={!isProject || folder.user_id === $user?.id || $user?.role === 'admin'}
+				onArchive={() => (showArchiveConfirm = true)}
+				onRestore={() => setProjectArchived(false)}
+				onEdit={() => {
+					showFolderModal = true;
+				}}
+				onDelete={() => {
+					showDeleteConfirm = true;
+				}}
+				onExport={() => {
+					exportHandler();
+				}}
+				onMarkAllRead={markAllReadHandler}
+				onCreateSubFolder={() => {
+					showCreateSubFolderModal = true;
+				}}
+				onShare={!isProject && ($user?.role === 'admin' ||
+				(folder?.user_id === $user?.id && $user?.permissions?.sharing?.folders))
+					? () => (showShareModal = true)
+					: null}
+			>
+				<div
+					class="flex size-4 items-center justify-center rounded text-gray-400 hover:bg-gray-200 hover:text-gray-700 dark:hover:bg-white/10 dark:hover:text-white"
+				>
+					<EllipsisHorizontal className="size-3" strokeWidth="1.5" />
+				</div>
+			</FolderMenu>
+		</div>
+	{/if}
+{/snippet}
 
 {#if folder}
 	<FolderModal
@@ -197,6 +237,10 @@
 		project={isProject}
 		onSubmit={updateHandler}
 	/>
+
+	{#if !isProject}
+		<FolderShareModal bind:show={showShareModal} {folder} />
+	{/if}
 
 	{#if !isProject}
 		<FolderModal
@@ -242,86 +286,4 @@
 			</div>
 		{/if}
 	</DeleteConfirmDialog>
-
-	<div
-		class="{folder.data?.description
-			? 'mb-0.5'
-			: 'mb-2'} px-5 @md:max-w-3xl justify-between w-full flex relative group items-center"
-	>
-		<div class="text-center flex gap-3.5 items-center">
-			{#if readOnly}
-				<div
-					class="rounded-full bg-gray-50/50 dark:bg-gray-800/40 size-11 flex justify-center items-center"
-				>
-					{#if folder?.meta?.icon}
-						<Emoji className="size-7" shortCode={folder.meta.icon} />
-					{:else}
-						<Folder className="size-6" strokeWidth="2" />
-					{/if}
-				</div>
-			{:else}
-				<EmojiPicker
-					onClose={() => {}}
-					selected={folder?.meta?.icon ?? null}
-					onSubmit={(name) => {
-						console.log(name);
-						updateIconHandler(name);
-					}}
-				>
-					<button
-						aria-label={$i18n.t('Change folder icon')}
-						class="rounded-full bg-gray-50/50 dark:bg-gray-800/40 size-11 flex justify-center items-center outline-hidden focus:outline-hidden"
-					>
-						{#if folder?.meta?.icon}
-							<Emoji className="size-7" shortCode={folder.meta.icon} />
-						{:else}
-							<Folder className="size-6" strokeWidth="2" />
-						{/if}
-					</button>
-				</EmojiPicker>
-			{/if}
-
-			<div class="text-3xl line-clamp-1">
-				{folder.name}
-			</div>
-		</div>
-
-		{#if !readOnly || projectArchived}
-			<div class="flex items-center translate-x-2.5">
-				<FolderMenu
-					align="end"
-					{isProject}
-					{projectArchived}
-					canDelete={!isProject || folder?.user_id === $user?.id || $user?.role === 'admin'}
-					onArchive={() => (showArchiveConfirm = true)}
-					onRestore={() => setProjectArchived(false)}
-					onEdit={() => {
-						showFolderModal = true;
-					}}
-					onDelete={() => {
-						showDeleteConfirm = true;
-					}}
-					onExport={() => {
-						exportHandler();
-					}}
-					onCreateSubFolder={() => {
-						showCreateSubFolderModal = true;
-					}}
-				>
-					<div class="inline-flex p-1.5 dark:hover:bg-gray-850 rounded-full touch-auto">
-						<EllipsisHorizontal className="size-4" strokeWidth="2.5" />
-					</div>
-				</FolderMenu>
-			</div>
-		{/if}
-	</div>
-
-	{#if folder.data?.description}
-		<!-- Align with the title after the row padding, icon, and gap. -->
-		<div
-			class="mb-2 w-full pl-[4.875rem] pr-6 text-left text-sm text-gray-400 dark:text-gray-500 @md:max-w-3xl"
-		>
-			<p class="line-clamp-2 whitespace-pre-wrap break-words">{folder.data.description}</p>
-		</div>
-	{/if}
 {/if}

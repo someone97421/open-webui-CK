@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getContext, createEventDispatcher } from 'svelte';
 
-	const i18n = getContext('i18n');
+	const i18n = getContext<typeof import('$lib/i18n').default>('i18n');
 	const dispatch = createEventDispatcher();
 
 	import { user } from '$lib/stores';
@@ -15,6 +15,7 @@
 	import Download from '../icons/Download.svelte';
 	import CheckIcon from '$lib/components/icons/Check.svelte';
 	import ArchiveIcon from '../icons/Archive.svelte';
+	import ShareIcon from '../icons/Share.svelte';
 
 	export let align: 'start' | 'end' = 'start';
 	export let onNewChat: (() => void) | null = null;
@@ -28,6 +29,7 @@
 	export let onRestore = () => {};
 	export let isProject = false;
 	export let projectArchived = false;
+	export let onShare: (() => void) | null = null;
 	let show = false;
 </script>
 
@@ -55,6 +57,7 @@
 	</Tooltip>
 
 	<div slot="content">
+		<!-- Grouped: create, manage the folder, read state, then delete on its own. -->
 		<DropdownMenu className="min-w-[10.625rem]">
 			{#if onNewChat && !projectArchived}
 				<button
@@ -81,37 +84,39 @@
 
 			<button
 				class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
-				on:click={() => {
-					onMarkAllRead();
-				}}
-			>
-				<CheckIcon className="size-3.5" />
-				<div class="flex items-center">{$i18n.t('Mark all as read')}</div>
-			</button>
-
-			<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
-
-			<button
-				class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
-				on:click={() => {
-					onEdit();
-				}}
+				on:click={() => onEdit()}
 			>
 				<EditPencil className="size-3.5" />
 				<div class="flex items-center">{isProject ? '编辑项目' : $i18n.t('Edit')}</div>
 			</button>
-
+			{#if onShare && !isProject}
+				<button
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
+					on:click={() => onShare?.()}
+				>
+					<ShareIcon className="size-3.5" strokeWidth="1.5" />
+					<div class="flex items-center">{$i18n.t('Share')}</div>
+				</button>
+			{/if}
 			{#if $user?.role === 'admin' || ($user?.permissions?.chat?.export ?? true)}
 				<button
 					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
-					on:click={() => {
-						onExport();
-					}}
+					on:click={() => onExport()}
 				>
 					<Download className="size-3.5" />
 					<div class="flex items-center">{$i18n.t('Export')}</div>
 				</button>
 			{/if}
+
+			<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
+
+			<button
+				class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"
+				on:click={() => onMarkAllRead()}
+			>
+				<CheckIcon className="size-3.5" />
+				<div class="flex items-center">{$i18n.t('Mark all as read')}</div>
+			</button>
 
 			<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
 

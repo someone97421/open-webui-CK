@@ -13,6 +13,9 @@
 
 	export let char = '';
 	export let query = '';
+	export let selectedTerminalId: Readable<string | null>;
+	export let modelId: string | null | (() => string | null) = null;
+	$: selectedModelId = typeof modelId === 'function' ? modelId() : modelId;
 	export let command: (payload: {
 		id: string;
 		label: string;
@@ -214,6 +217,8 @@
 				/>
 			{:else if char === '@'}
 				<AtCommands
+					{selectedTerminalId}
+					modelId={selectedModelId}
 					bind:this={suggestionElement}
 					{query}
 					fileUploadEnabled={isFileUploadEnabled}

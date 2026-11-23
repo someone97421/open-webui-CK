@@ -14,6 +14,7 @@
 	import AdvancedParams from '$lib/components/chat/Settings/Advanced/AdvancedParams.svelte';
 	import Capabilities from '$lib/components/workspace/Models/Capabilities.svelte';
 	import ToolsSelector from '$lib/components/workspace/Models/ToolsSelector.svelte';
+	import TerminalSelector from '$lib/components/workspace/Models/TerminalSelector.svelte';
 
 	export let initHandler = () => {};
 	export let dirty = false;
@@ -28,12 +29,14 @@
 	let defaultCapabilities = {};
 	let defaultFeatureIds = [];
 	let toolIds = [];
+	let terminalId = '';
 	let defaultParams = {};
 	let builtinTools = {};
 
 	$: configuredParams = Object.entries(defaultParams ?? {}).filter(
 		([_, value]) => value !== null && value !== '' && value !== undefined
 	);
+	$: hasTerminal = $appConfig?.features?.enable_terminal_servers;
 	$: enabledCapabilities = Object.entries(defaultCapabilities ?? {}).filter(([_, value]) => value);
 
 	const getSnapshot = () =>
@@ -41,6 +44,7 @@
 			defaultCapabilities,
 			defaultFeatureIds,
 			toolIds,
+			terminalId,
 			defaultParams: Object.fromEntries(configuredParams),
 			builtinTools
 		});
@@ -50,7 +54,7 @@
 		dirty = savedSnapshot !== '' && getSnapshot() !== savedSnapshot;
 	};
 
-	$: (toolIds, updateDirty());
+	$: (toolIds, terminalId, updateDirty());
 
 	const init = async () => {
 		loading = true;
@@ -62,11 +66,13 @@
 			defaultFeatureIds = savedMeta.defaultFeatureIds ?? [];
 			builtinTools = savedMeta.builtinTools ?? {};
 			toolIds = savedMeta.toolIds ?? [];
+			terminalId = savedMeta.terminalId ?? '';
 		} else {
 			defaultCapabilities = { ...DEFAULT_CAPABILITIES };
 			defaultFeatureIds = [];
 			builtinTools = {};
 			toolIds = [];
+			terminalId = '';
 		}
 
 		await tools.set((await getTools(localStorage.token).catch(() => null)) ?? []);
@@ -86,7 +92,8 @@
 			capabilities: defaultCapabilities,
 			...(defaultFeatureIds.length > 0 ? { defaultFeatureIds } : {}),
 			...(Object.keys(builtinTools).length > 0 ? { builtinTools } : {}),
-			...(toolIds.length > 0 ? { toolIds } : {})
+			...(toolIds.length > 0 ? { toolIds } : {}),
+			...(terminalId ? { terminalId } : {})
 		};
 
 		config = await getModelsConfig(localStorage.token);
@@ -182,6 +189,15 @@
 				</div>
 
 				<ToolsSelector bind:selectedToolIds={toolIds} tools={$tools ?? []} />
+
+				{#if defaultCapabilities.terminal && hasTerminal}
+					<TerminalSelector
+						bind:terminalId
+						description={$i18n.t(
+							'Choose the terminal server selected by default for chats with models that do not set their own.'
+						)}
+					/>
+				{/if}
 
 				<div>
 					<button

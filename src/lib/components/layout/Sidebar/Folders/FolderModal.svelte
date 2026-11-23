@@ -9,6 +9,9 @@
 	import Modal from '$lib/components/common/Modal.svelte';
 	import AccessButton from '$lib/components/common/AccessButton.svelte';
 	import FolderShareModal from './FolderShareModal.svelte';
+	import EmojiPicker from '$lib/components/common/EmojiPicker.svelte';
+	import Emoji from '$lib/components/common/Emoji.svelte';
+	import FolderIcon from '$lib/components/icons/Folder.svelte';
 	import XMark from '../icons/XMark.svelte';
 
 	import { toast } from 'svelte-sonner';
@@ -16,6 +19,12 @@
 	import ModelSelector from '$lib/components/chat/ModelSelector/Selector.svelte';
 	import ProjectAgentsEditor from '$lib/components/chat/Placeholder/ProjectAgentsEditor.svelte';
 	import FolderAttachmentDefaults from '$lib/components/chat/FolderAttachmentDefaults.svelte';
+	import FileNav from '$lib/components/chat/FileNav.svelte';
+	import FolderOpen from '$lib/components/icons/FolderOpen.svelte';
+	import TerminalMenu from '$lib/components/chat/MessageInput/TerminalMenu.svelte';
+	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
+	import { writable } from 'svelte/store';
+
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import AdvancedParams from '$lib/components/chat/Settings/Advanced/AdvancedParams.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
@@ -36,7 +45,10 @@
 
 	let folder = null;
 	let name = '';
-	let meta = { background_image_url: null };
+	let meta: { background_image_url: string | null; icon: string; [key: string]: unknown } = {
+		background_image_url: null,
+		icon: ''
+	};
 	let data: Record<string, any> = {
 		description: '',
 		model_ids: [] as string[],
@@ -52,6 +64,7 @@
 	let attachmentsLoading = true;
 	let attachmentsLoadFailed = false;
 	let showAccessModal = false;
+	let showDirectoryPicker = false;
 	let projectTerminalId = '';
 	let paramsExpanded = false;
 	let agentsExpanded = false;
@@ -71,6 +84,17 @@
 
 	const isCurrent = (sequence: number, id: string | null) =>
 		show && sequence === modalSequence && folderId === id;
+
+	const folderTerminal = writable<string | null>(null);
+	$: folderTerminal.set(data.terminal_id || null);
+	const folderTerminalSelection = {
+		subscribe: folderTerminal.subscribe,
+		set: (id: string | null) => {
+			if ((id ?? '') === data.terminal_id) return;
+			data.terminal_id = id ?? '';
+			data.working_directory = '';
+		}
+	};
 
 	const submitHandler = async () => {
 		if (initializing || loading || attachmentsLoading || attachmentsLoadFailed || agentsSaving || projectArchived || (folderId && !folder)) return;
@@ -138,9 +162,10 @@
 		attachmentsLoading = isOpen;
 		attachmentsLoadFailed = false;
 		showAccessModal = false;
+		showDirectoryPicker = false;
 		folder = null;
 		name = '';
-		meta = { background_image_url: null };
+		meta = { background_image_url: null, icon: '' };
 		data = { description: '', model_ids: [], params: {}, skill_ids: [], tool_ids: [], system_prompt: '', files: [] };
 		paramsExpanded = false;
 		projectTerminalId = '';
@@ -161,7 +186,11 @@
 			}
 			folder = loaded;
 			name = folder.name;
-			meta = folder.meta || { background_image_url: null };
+			meta = {
+				background_image_url: null,
+				icon: '',
+				...folder.meta
+			};
 			data = {
 				system_prompt: '',
 				files: [],
@@ -222,15 +251,38 @@
 					<label for="folder-name" class="mb-1 block text-xs text-gray-500">
 						{projectMode ? '项目名称' : $i18n.t('Folder Name')}
 					</label>
-					<input
-						id="folder-name"
-						class="w-full bg-transparent text-sm outline-hidden placeholder:text-gray-300 dark:placeholder:text-gray-700"
-						type="text"
-						bind:value={name}
-						placeholder={projectMode ? '输入项目名称' : $i18n.t('Enter folder name')}
-						autocomplete="off"
-						disabled={loading || initializing || projectArchived}
-					/>
+					<div class="flex items-center gap-2">
+						<EmojiPicker
+							side="bottom"
+							selected={meta.icon || null}
+							onSubmit={(icon: string | null) => {
+								meta = { ...meta, icon: icon ?? '' };
+							}}
+						>
+							<button
+								type="button"
+								class="flex size-7 shrink-0 items-center justify-center rounded-full text-gray-500 hover:bg-gray-50/40 dark:text-gray-400 dark:hover:bg-gray-800/40"
+								aria-label={$i18n.t('Change folder icon')}
+								title={$i18n.t('Change folder icon')}
+								disabled={loading || initializing || projectArchived}
+							>
+								{#if meta.icon}
+									<Emoji shortCode={meta.icon} className="size-4" />
+								{:else}
+									<FolderIcon className="size-4" />
+								{/if}
+							</button>
+						</EmojiPicker>
+						<input
+							id="folder-name"
+							class="w-full bg-transparent text-sm outline-hidden placeholder:text-gray-300 dark:placeholder:text-gray-700"
+							type="text"
+							bind:value={name}
+							placeholder={projectMode ? '输入项目名称' : $i18n.t('Enter folder name')}
+							autocomplete="off"
+							disabled={loading || initializing || projectArchived}
+						/>
+					</div>
 				</div>
 
 				<div class="my-2">
@@ -248,6 +300,68 @@
 					/>
 				</div>
 
+				{#if !projectMode && $config?.features?.enable_terminal_servers}
+					<div
+						class="grid min-h-7 grid-cols-[7rem_minmax(0,1fr)] items-center gap-2 px-1 text-xs font-normal text-gray-600 dark:text-gray-400 sm:grid-cols-[8rem_minmax(0,1fr)]"
+					>
+						<ModelSettingsLabel
+							label={$i18n.t('Default terminal')}
+							description={$i18n.t(
+								'Select the terminal used by default for new chats in this folder.'
+							)}
+						/>
+						<div class="flex min-w-0">
+							<TerminalMenu selectedTerminalId={folderTerminalSelection} showDirectory={false} disabled={loading || initializing}>
+								{#snippet trigger(selected: string | null, label: string)}
+									<button
+										type="button"
+										class="flex w-fit max-w-full min-w-0 items-center gap-1 bg-transparent px-0.5 text-left text-xs font-normal text-gray-900 dark:text-gray-100"
+									>
+										<span class="sr-only">{$i18n.t('Default terminal')}: </span>
+										<span class="truncate">{selected ? label : $i18n.t('None')}</span>
+										<ChevronDown className="size-3 shrink-0" />
+									</button>
+								{/snippet}
+							</TerminalMenu>
+						</div>
+					</div>
+					{#if data.terminal_id}
+						<div
+							class="grid grid-cols-[7rem_minmax(0,1fr)] items-start gap-2 px-1 py-1 sm:grid-cols-[8rem_minmax(0,1fr)]"
+						>
+							<label
+								for="folder-working-directory"
+								class="block text-xs font-normal text-gray-600 dark:text-gray-400"
+							>
+								<ModelSettingsLabel
+									label={$i18n.t('Working directory')}
+									description={$i18n.t(
+										'Path on the selected terminal. Applies to new chats only.'
+									)}
+								/>
+							</label>
+							<div class="flex min-w-0 items-center gap-2">
+								<input
+									id="folder-working-directory"
+									class="min-w-0 flex-1 bg-transparent text-xs font-normal text-gray-900 outline-hidden placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-600"
+									bind:value={data.working_directory}
+										disabled={loading || initializing}
+									placeholder={$i18n.t('Use the terminal’s default directory')}
+								/>
+								<button
+									type="button"
+									aria-label={$i18n.t('Browse directories')}
+									title={$i18n.t('Browse directories')}
+									class="shrink-0 text-gray-500 hover:text-gray-900 dark:hover:text-gray-100"
+									on:click={() => (showDirectoryPicker = true)}
+									><FolderOpen className="size-3.5" /></button
+								>
+							</div>
+						</div>
+					{/if}
+
+				{/if}
+
 				<div class="my-2 flex items-center justify-between gap-4">
 					<label for="model-selector-folder-default-button" class="shrink-0 text-xs text-gray-500" title="仅影响新会话，会话中可自由切换模型；清空后使用常规默认模型。">
 						{$i18n.t('Default Model')}
@@ -257,7 +371,7 @@
 							<ModelSelector
 								id="folder-default"
 								placeholder={$i18n.t('Use default')}
-								items={$models.filter((model) => !projectMode || model.info?.meta?.capabilities?.terminal !== false).map((model) => ({ value: model.id, label: model.name, model }))}
+								items={$models.filter((model) => !model.id.startsWith('agent:') && (!projectMode || model.info?.meta?.capabilities?.terminal !== false)).map((model) => ({ value: model.id, label: model.name, model }))}
 								triggerClassName="text-xs"
 								placement="auto"
 								align="end"
@@ -456,4 +570,32 @@
 
 {#if show && !projectMode && edit && folder && ($user?.role === 'admin' || folder.user_id === $user?.id)}
 	<FolderShareModal bind:show={showAccessModal} {folder} />
+{/if}
+
+{#if show && !projectMode && showDirectoryPicker && data.terminal_id}
+	<Modal bind:show={showDirectoryPicker} ariaLabel={$i18n.t('Choose working directory')} size="md">
+		<div class="px-2 py-4">
+			<div class="mb-3 flex items-center justify-between px-2 text-sm">
+				<span>{$i18n.t('Choose working directory')}</span>
+				<button
+					type="button"
+					aria-label={$i18n.t('Close')}
+					class="text-gray-500 hover:text-gray-900 dark:hover:text-gray-100"
+					on:click={() => (showDirectoryPicker = false)}><XMark className="size-4" /></button
+				>
+			</div>
+			<div class="h-[60dvh] min-h-0">
+				<FileNav
+					terminalId={data.terminal_id}
+					initialDirectory={data.working_directory || null}
+					manageFileRequests={false}
+					showTerminalDock={false}
+					onSelectDirectory={(path) => {
+						data.working_directory = path;
+						showDirectoryPicker = false;
+					}}
+				/>
+			</div>
+		</div>
+	</Modal>
 {/if}

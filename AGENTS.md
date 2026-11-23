@@ -37,7 +37,7 @@
 | 管理员站点显示配置 | 网站名称与 LOGO 可在界面设置中保存，支持上传图片及直链 | 保留持久化配置、公开站点资源及登录页/侧栏同步；保留原始版权、许可证和默认资源，README 与提交说明仅作通用项目说明 |
 | 统一 Skill 包与分组挂载 | 工作区与 Terminal 技能统一按文件夹管理，按对话／助手／项目及能力筛选；分组用多列开关配置默认 Skill、工具，并配置默认模型与模型参数，仅初始化新会话，会话自由调整并独立持久化 | 保留 `meta.modes`／`meta.requires`、含 Terminal 与作用域的包引用和旧引用兼容；分组默认值显式存储，旧缺省继承兼容读取；会话 `attachment_overrides.defaults` 固定初始基线并保留增减，`input_controls` 保存输入区开关，`models`／`params` 保存会话模型与参数，不随分组默认值变化；反向关联复用分组配置，模式过滤覆盖发现、注入与读取，不跨项目暴露资源 |
 | 会话思考级别快捷滑条 | 输入区设置面板顶部八档调节，按会话独立保存 | 保留 omit、off、默认的不同语义；沿用 `params.reasoning_effort` 与高级参数同步，omit 在最终请求中剥离思考配置且不被默认参数或 Responses 自动补回 |
-| 上游新运行入口与附件兼容 | 保护工作区隔离与现有模型行为 | 编码代理、Tether 与设备授权会话暂缓项按同步记录人工复查；Auto 工具审批默认关闭；隐藏工具结果须保留调用配对与思考续聊数据；旧模型 file_context 未配置时继续预加载附件，RAG 默认值保持 3/1000 |
+| 上游新运行入口与附件兼容 | 保护工作区隔离与现有模型行为 | 编码代理、Tether、设备授权会话及上游服务端消息排队暂缓项按同步记录人工复查；Tether 调用点经 `utils/terminal_client.py` 空实现兜底，不恢复 `utils/tether.py`；用户直连已随上游移除；Auto 工具审批默认关闭；隐藏工具结果须保留调用配对与思考续聊数据；旧模型 file_context 未配置时继续预加载附件，RAG 默认值保持 3/1000 |
 | 录音便笺全局开关 | 管理员语音设置统一控制，默认关闭 | 保留 `audio.voice_note.enabled` 持久化和前端同步，菜单、快捷键及录音入口一致受控；关闭时停止录制并保留已有草稿 |
 | 运行中消息排队与补充输入 | 支持逐条排队、调整顺序和不中断当前任务的补充要求 | 保留按会话排队、逐轮自动发送、按任务及消息绑定的交付确认与失败保留，以及过程中的补充消息展示 |
 | 模型轮次有限重试与断流判定 | 断流、超时、限流、5xx 或模型回空时自动恢复，避免任务卡死或静默停止 | 保留 `utils/upstream_retry.py` 的 `RetryBudget`（每轮共享 `UPSTREAM_MAX_ATTEMPTS` 默认 5 次，指数退避 `UPSTREAM_RETRY_BASE_DELAY`/`UPSTREAM_RETRY_MAX_DELAY`，遵守 Retry-After）、首轮在 `main.py` 经 `request_with_retry` 发起并通过 `ctx['retry_budget']` 交给流式处理、`stream_round` 统一处理断流与空回合（仅思考也算空，第二次空回复起追加催促），重试前清空本轮输出并 flush；`interrupted` 断流标记、可重试流异常转断流、Anthropic 缺少 message_stop 抛 `StreamInterruptedError`；流式空闲超时 `AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT` 默认 120 秒；直连模型不重试；提示统一在循环结束后经 `round_notice` 发出 |

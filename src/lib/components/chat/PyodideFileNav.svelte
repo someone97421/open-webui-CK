@@ -450,6 +450,19 @@
 		onGoBack={goBack}
 		onGoForward={goForward}
 		onNavigate={(path) => loadDir(path)}
+		listFolders={async (path) => {
+			try {
+				const res = await sendWorkerMessage({
+					type: 'fs:list',
+					path: path.replace(/\/$/, '') || '/'
+				});
+				return (res.entries || [])
+					.filter((entry: FileEntry) => entry.type === 'directory')
+					.map((entry: FileEntry) => entry.name);
+			} catch {
+				return [];
+			}
+		}}
 		onRefresh={() => refreshView(true)}
 		onNewFolder={startNewFolder}
 		onNewFile={startNewFile}

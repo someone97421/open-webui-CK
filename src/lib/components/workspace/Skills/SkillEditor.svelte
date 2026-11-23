@@ -1,4 +1,7 @@
 <script lang="ts">
+	import { getPageContext, onTabLeave } from '$lib/utils/page';
+	const { goto, tab: pageTab } = getPageContext();
+
 	import Comments from '$lib/components/comments/Comments.svelte';
 	import type { CommentsRequest } from '$lib/components/comments/CommentsPanel.svelte';
 	let comments: CommentsRequest | null = null;
@@ -24,7 +27,7 @@
 	import { slugify, parseFrontmatter, formatSkillName } from '$lib/utils';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { updateSkillAccessGrants } from '$lib/apis/skills';
-	import { goto, beforeNavigate } from '$app/navigation';
+	import { beforeNavigate } from '$app/navigation';
 	import SkillFiles from './SkillFiles.svelte';
 	import SkillMetadata from './SkillMetadata.svelte';
 	import SkillBindings from './SkillBindings.svelte';
@@ -105,6 +108,11 @@
 			discard = true;
 		} else action();
 	};
+	onTabLeave(async () => {
+		// a save right before leaving has not updated dirty yet
+		await tick();
+		return !dirty || window.confirm($i18n.t('Discard unsaved skill changes?'));
+	});
 	beforeNavigate(({ cancel }) => {
 		if (dirty && !window.confirm($i18n.t('Discard unsaved skill changes?'))) cancel();
 	});
@@ -243,7 +251,7 @@
 			}, packageContext);
 			remember();
 			await goto(skillPackageEditUrl(result.id, packageContext));
-			window.location.reload();
+			if (!pageTab) window.location.reload();
 		} catch (error) {
 			toast.error(skillError(error));
 		}

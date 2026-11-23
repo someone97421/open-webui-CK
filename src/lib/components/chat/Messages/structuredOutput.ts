@@ -1,5 +1,7 @@
 import { encode } from 'html-entities';
 import { chatFileAttachmentKey, isChatFileAttachment } from '$lib/utils/chatFiles';
+import { getDispatchedVisualizationPreviews } from '$lib/utils/visualizations/dispatch';
+import { agentView, terminalView, type AgentView } from './agentViews';
 
 export type OutputContentPart = {
 	type?: string;
@@ -16,6 +18,9 @@ export type OutputItem = {
 	display_labels?: { running?: string; completed?: string };
 	status?: string;
 	hidden?: boolean;
+	tool_id?: string;
+	tool_type?: string;
+	tool_targets?: Record<string, { tool_id: string; tool_type: string }>;
 	arguments?: unknown;
 	content?: OutputContentPart[];
 	summary?: OutputContentPart[] | string;
@@ -34,6 +39,7 @@ export type OutputItem = {
 export type OutputDetailToken = {
 	summary: string;
 	text: string;
+	view?: AgentView | null;
 	attributes: {
 		type: string;
 		id?: string;
@@ -51,6 +57,7 @@ export type OutputDetailToken = {
 };
 
 export type OutputDisplayItem =
+	| { type: 'visualization'; id: string; call: OutputItem; result?: OutputItem }
 	| {
 			type: 'message';
 			id: string;
@@ -86,6 +93,7 @@ export type OutputDisplayItem =
 			type: 'context_compaction';
 			id: string;
 			summary: string;
+			status?: 'in_progress' | 'failed';
 	  };
 
 type ResponseStreamEvent = {
@@ -159,7 +167,7 @@ function getReasoningText(item: OutputItem): string {
 	return getTextFromParts(summary ?? item.content ?? []);
 }
 
-function getToolResultText(item?: OutputItem): string {
+export function getToolResultText(item?: OutputItem): string {
 	return (item?.output ?? [])
 		.filter((part) => part?.type !== 'input_image')
 		.map((part) => {
@@ -207,7 +215,10 @@ function getInlineFileFromToolOutput(callItem?: OutputItem, resultItem?: OutputI
 		: result;
 }
 
-function buildToolCallToken(item: OutputItem, toolOutputByCallId: Record<string, OutputItem>) {
+export function buildToolCallToken(
+	item: OutputItem,
+	toolOutputByCallId: Record<string, OutputItem>
+) {
 	const callId = item.call_id ?? item.id ?? '';
 	const resultItem = toolOutputByCallId[callId];
 	const status = String(item.status ?? '');
@@ -229,6 +240,7 @@ function buildToolCallToken(item: OutputItem, toolOutputByCallId: Record<string,
 		}
 	}
 
+	const text = getToolResultText(resultItem);
 	return {
 		summary: isPending
 			? 'Tool Approval Needed'
@@ -237,7 +249,8 @@ function buildToolCallToken(item: OutputItem, toolOutputByCallId: Record<string,
 				: isExecuting
 					? 'Executing...'
 					: 'Preparing...',
-		text: getToolResultText(resultItem),
+		text,
+		view: agentView(item, text) ?? terminalView(item, text),
 		attributes: {
 			type: 'tool_calls',
 			id: callId,
@@ -411,6 +424,11 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 			return;
 		}
 
+		for (const call of getDispatchedVisualizationPreviews(item)) {
+			flushDetails();
+			displayItems.push({ type: 'visualization', id: `visualization:${call.call_id}`, call });
+		}
+
 		if (isHiddenToolCall(item)) {
 			return;
 		}
@@ -446,6 +464,23 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 			return;
 		}
 
+		if (
+			item.type === 'function_call' &&
+			item.tool_type === 'builtin' &&
+			item.tool_id === 'builtin:render_visualization' &&
+			(item.call_id || item.id)
+		) {
+			flushDetails();
+			const callId = item.call_id ?? item.id!;
+			displayItems.push({
+				type: 'visualization',
+				id: `visualization:${callId}`,
+				call: item,
+				result: toolOutputByCallId[callId]
+			});
+			return;
+		}
+
 		if (item.type && GROUPABLE_OUTPUT_TYPES.has(item.type)) {
 			const token = buildDetailToken(item, index === output.length - 1, toolOutputByCallId);
 			if (token) {
@@ -459,7 +494,8 @@ export function buildOutputDisplayItems(output: OutputItem[] = []): OutputDispla
 			displayItems.push({
 				type: 'context_compaction',
 				id: item.id ?? `context-compaction-${index}`,
-				summary: typeof item.summary === 'string' ? item.summary : ''
+				summary: typeof item.summary === 'string' ? item.summary : '',
+				status: item.status === 'in_progress' || item.status === 'failed' ? item.status : undefined
 			});
 			return;
 		}
