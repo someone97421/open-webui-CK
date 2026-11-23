@@ -242,6 +242,7 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
+from open_webui.utils.upstream_retry import RetryBudget, request_with_retry
 from open_webui.utils.chat_id import (
     get_temporary_chat_session_id,
     is_saved_chat_id,
@@ -1643,7 +1644,10 @@ async def chat_completion(
                 if paused:
                     return {'status': True, 'chat_id': metadata.get('chat_id'), 'paused': True}
 
-                response = await chat_completion_handler(request, form_data, user)
+                retry_budget = RetryBudget(1 if metadata.get('direct') else None)
+                response = await request_with_retry(
+                    lambda: chat_completion_handler(request, form_data, user), retry_budget, 'Chat completion request'
+                )
 
                 if isinstance(response, Response) and response.status_code >= 400:
                     error_detail = get_response_error_detail(response)
@@ -1656,6 +1660,7 @@ async def chat_completion(
                 else:
                     ctx.update(form_data=form_data, metadata=metadata, events=events)
 
+                ctx['retry_budget'] = retry_budget
                 return await process_chat_response(response, ctx)
             except asyncio.CancelledError:
                 log.info('Chat processing was cancelled')

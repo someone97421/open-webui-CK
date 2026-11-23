@@ -10,6 +10,7 @@ from copy import deepcopy
 from uuid import uuid4
 
 from open_webui.utils.json_codec import JSONCodec
+from open_webui.utils.upstream_retry import StreamInterruptedError
 
 
 _REASONING_FORMAT = 'anthropic-claude-v1'
@@ -481,7 +482,7 @@ async def convert_anthropic_stream_to_chat_completions(body_iterator):
     async for event_name, event in _sse_events(body_iterator):
         if event == '[DONE]':
             if not stopped:
-                raise ValueError('Anthropic SSE 缺少 message_stop')
+                raise StreamInterruptedError('Anthropic SSE 缺少 message_stop')
             continue
         kind = event.get('type') or event_name
         if kind == 'ping':
@@ -594,6 +595,6 @@ async def convert_anthropic_stream_to_chat_completions(body_iterator):
         else:
             continue
     if not stopped:
-        raise ValueError('Anthropic SSE 在 message_stop 前中断')
+        raise StreamInterruptedError('Anthropic SSE 在 message_stop 前中断')
     yield chunk({}, finish=finish_reason, final_usage=True)
     yield 'data: [DONE]\n\n'

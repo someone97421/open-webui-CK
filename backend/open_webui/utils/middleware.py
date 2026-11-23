@@ -106,6 +106,7 @@ from open_webui.utils.filter import (
 from open_webui.utils.json_codec import JSONCodec, dumps_bytes
 from open_webui.utils.mcp.apps import MCPAppResult
 from open_webui.utils.memory import add_memory_context, recall_memories, review_memory_after_turn
+from open_webui.utils.upstream_retry import RetryBudget, describe_error, is_retryable_error, request_with_retry
 from open_webui.utils.misc import (
     add_or_update_system_message,
     add_or_update_user_message,
@@ -231,6 +232,20 @@ def _is_tool_result_error(value: Any) -> bool:
         return _is_tool_result_error(parsed['result'])
 
     return False
+
+
+EMPTY_REPLY_NUDGE = '上一轮回复为空。请继续完成任务；如果任务已经完成，请直接给出最终答复。'
+EMPTY_TURN_ERROR = '模型多次返回空响应，自动重试后仍未继续。可以发送“继续”让它接着完成。'
+STREAM_INTERRUPTED_ERROR = '上游流式响应多次中断，自动重试后仍未完成，本轮回复可能不完整。'
+
+
+def with_empty_reply_nudge(form_data: dict, empty_replies: int) -> dict:
+    if empty_replies < 2:
+        return form_data
+    return {
+        **form_data,
+        'messages': [*form_data.get('messages', []), {'role': 'user', 'content': EMPTY_REPLY_NUDGE}],
+    }
 
 
 def normalize_messages_for_model(form_data: dict) -> dict:
@@ -4877,6 +4892,19 @@ async def streaming_chat_response_handler(response, ctx):
                     ]
                 return prior_output + output if prior_output else output
 
+            def is_empty_round() -> bool:
+                for item in output:
+                    item_type = item.get('type')
+                    if item_type == 'reasoning':
+                        continue
+                    if item_type == 'message' and not any(
+                        isinstance(part, dict) and str(part.get('text') or '').strip()
+                        for part in item.get('content', [])
+                    ):
+                        continue
+                    return False
+                return True
+
             stream_size = 0
             snapshot_size = 0
 
@@ -4997,6 +5025,7 @@ async def streaming_chat_response_handler(response, ctx):
                     nonlocal stream_size
 
                     response_tool_calls = []
+                    stream_completed = False
                     finish_reason = None
                     prior_usage = usage
                     current_usage = {}
@@ -5105,7 +5134,22 @@ async def streaming_chat_response_handler(response, ctx):
 
                     filter_extra_params = {'__body__': current_form_data, **extra_params} if filter_functions else None
 
-                    async for line in response.body_iterator:
+                    stream_error = None
+
+                    async def guarded_stream(iterator):
+                        nonlocal stream_error
+                        try:
+                            async for chunk in iterator:
+                                yield chunk
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as error:
+                            if getattr(request.state, 'direct', False) or not is_retryable_error(error):
+                                raise
+                            stream_error = error
+                            log.warning('Model stream broke mid-response: %s', describe_error(error))
+
+                    async for line in guarded_stream(response.body_iterator):
                         line = line.decode('utf-8', 'replace') if isinstance(line, bytes) else line
                         data = line
 
@@ -5810,7 +5854,7 @@ async def streaming_chat_response_handler(response, ctx):
                         except Exception as e:
                             done = 'data: [DONE]' in line
                             if done:
-                                pass
+                                stream_completed = True
                             else:
                                 log.debug('Error: %s', e)
                                 stream_size = 0
@@ -5819,6 +5863,13 @@ async def streaming_chat_response_handler(response, ctx):
                             if not stream_size or not request.app.state.redis:
                                 await save_current_response_stream()
                     await flush_pending_delta_data()
+                    if (
+                        (stream_error is not None or not stream_completed)
+                        and finish_reason is None
+                        and not getattr(request.state, 'direct', False)
+                    ):
+                        finish_reason = 'interrupted'
+                        log.warning('Model stream ended without a completion marker; treating the round as interrupted')
 
                     if output:
                         # Clean up the last message item
@@ -5851,7 +5902,7 @@ async def streaming_chat_response_handler(response, ctx):
                                     )
                                 reasoning_item['status'] = 'completed'
 
-                    incomplete = finish_reason in {'length', 'content_filter', 'incomplete', 'failed'}
+                    incomplete = finish_reason in {'length', 'content_filter', 'incomplete', 'failed', 'interrupted'}
                     if (
                         not response_tool_calls
                         and not incomplete
@@ -5964,13 +6015,63 @@ async def streaming_chat_response_handler(response, ctx):
                         usage = {**(usage or {}), 'incomplete': True}
                     return normalize_usage(current_usage)
 
+                async def stream_round(res, round_form_data, generate, budget):
+                    """Stream one model round, re-requesting after broken streams, empty replies and transient errors.
+
+                    Returns (response, notice): a non-streaming response for the caller to report, and a notice
+                    for the user once every attempt has failed.
+                    """
+                    nonlocal output, current_usage
+                    empty_replies = 0
+                    while True:
+                        if res is None:
+                            res = await request_with_retry(
+                                lambda: generate(empty_replies), budget, 'Model round re-request'
+                            )
+                            if not isinstance(res, StreamingResponse):
+                                return res, None
+                        content_snapshot = list(content_parts)
+                        output = []
+                        try:
+                            current_usage = await stream_body_handler(res, round_form_data)
+                        finally:
+                            log_model_usage(request, user, form_data['model'], current_usage)
+
+                        if finish_reason == 'interrupted':
+                            reason, notice = 'stream interrupted', STREAM_INTERRUPTED_ERROR
+                        elif not tool_calls and is_empty_round() and finish_reason not in {'length', 'content_filter'}:
+                            empty_replies += 1
+                            reason, notice = 'empty reply', EMPTY_TURN_ERROR
+                        else:
+                            return None, None
+
+                        tool_calls.clear()
+                        if budget.can_retry():
+                            output = []
+                            content_parts[:] = content_snapshot
+                        else:
+                            output = [item for item in output if item.get('type') != 'function_call']
+                        await save_current_response_stream()
+                        await event_emitter({'type': 'chat:completion', 'data': {'output': full_output(), 'flush': True}})
+                        if not budget.can_retry():
+                            return None, notice
+                        await budget.wait('Model round', reason)
+                        res = None
+
                 output_start = len(prior_output)
+
+                def generate_first_round(empty_replies):
+                    return generate_chat_completion(request, with_empty_reply_nudge(form_data, empty_replies), user)
+
                 try:
-                    current_usage = await stream_body_handler(response, form_data)
+                    retry_response, round_notice = await stream_round(
+                        response, form_data, generate_first_round, ctx.get('retry_budget') or RetryBudget()
+                    )
                 finally:
-                    log_model_usage(request, user, form_data['model'], current_usage)
                     if response.background:
                         await response.background()
+                if retry_response is not None and getattr(retry_response, 'status_code', 200) >= 400:
+                    round_notice = get_message_error_content(get_response_error_detail(retry_response))
 
                 tool_history = [item for item in prior_output if item.get('type') == 'function_call']
                 tool_call_iterations = 0
@@ -6525,11 +6626,19 @@ async def streaming_chat_response_handler(response, ctx):
                             new_form_data = final_answer_payload(new_form_data)
                         new_form_data = normalize_messages_for_model(new_form_data)
 
-                        res = await generate_chat_completion(
-                            request,
-                            new_form_data,
-                            user,
-                            bypass_system_prompt=True,
+                        round_notice = None
+                        round_budget = RetryBudget(1 if getattr(request.state, 'direct', False) else None)
+
+                        def generate_round(empty_replies, round_form_data=new_form_data):
+                            return generate_chat_completion(
+                                request,
+                                with_empty_reply_nudge(round_form_data, empty_replies),
+                                user,
+                                bypass_system_prompt=True,
+                            )
+
+                        res = await request_with_retry(
+                            lambda: generate_round(0), round_budget, 'Tool-call continuation request'
                         )
 
                         if pending_inputs and isinstance(res, StreamingResponse) and getattr(res, 'status_code', 200) < 400:
@@ -6562,10 +6671,11 @@ async def streaming_chat_response_handler(response, ctx):
                                     prior_output.pop()
                             output = []
                             output_start = len(prior_output)
-                            try:
-                                current_usage = await stream_body_handler(res, new_form_data)
-                            finally:
-                                log_model_usage(request, user, form_data['model'], current_usage)
+                            res, round_notice = await stream_round(res, new_form_data, generate_round, round_budget)
+                            if res is not None:
+                                if getattr(res, 'status_code', 200) >= 400:
+                                    await emit_message_error(get_message_error_content(get_response_error_detail(res)))
+                                break
                         elif getattr(res, 'status_code', 200) >= 400:
                             await emit_message_error(get_message_error_content(get_response_error_detail(res)))
                             break
@@ -6582,6 +6692,9 @@ async def streaming_chat_response_handler(response, ctx):
                         log.exception('Tool-call continuation failed: %s', error_content)
                         await emit_message_error(error_content)
                         break
+
+                if round_notice:
+                    await emit_message_error(round_notice)
 
                 if DETECT_CODE_INTERPRETER:
                     MAX_RETRIES = 5

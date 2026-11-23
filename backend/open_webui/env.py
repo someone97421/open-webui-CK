@@ -609,8 +609,9 @@ try:
 except (ValueError, TypeError):
     AIOHTTP_CLIENT_TIMEOUT = 300
 
-# Optional between-chunks idle cap for streaming aiohttp requests.
-AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = os.getenv('AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT', '')
+# Between-chunks idle cap for streaming aiohttp requests; a stalled stream is treated as broken and retried.
+# Set to 0 or an empty value to disable.
+AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = os.getenv('AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT', '120')
 if AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT == '':
     AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = None
 else:
@@ -1106,6 +1107,23 @@ else:
 # -1 means unlimited (no cap).
 if CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS == -1:
     CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS = None
+
+# Attempts per model round for transient upstream failures (connection errors, timeouts,
+# retryable HTTP statuses, broken streams and empty replies), with exponential backoff.
+try:
+    UPSTREAM_MAX_ATTEMPTS = max(1, int(os.getenv('UPSTREAM_MAX_ATTEMPTS', '5')))
+except ValueError:
+    UPSTREAM_MAX_ATTEMPTS = 5
+
+try:
+    UPSTREAM_RETRY_BASE_DELAY = max(0.0, float(os.getenv('UPSTREAM_RETRY_BASE_DELAY', '1')))
+except ValueError:
+    UPSTREAM_RETRY_BASE_DELAY = 1.0
+
+try:
+    UPSTREAM_RETRY_MAX_DELAY = max(0.0, float(os.getenv('UPSTREAM_RETRY_MAX_DELAY', '30')))
+except ValueError:
+    UPSTREAM_RETRY_MAX_DELAY = 30.0
 
 
 # WARNING: Experimental. Only enable if your upstream Responses API endpoint

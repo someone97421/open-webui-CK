@@ -40,6 +40,7 @@
 | 上游新运行入口与附件兼容 | 保护工作区隔离与现有模型行为 | 编码代理、Tether 与设备授权会话暂缓项按同步记录人工复查；Auto 工具审批默认关闭；隐藏工具结果须保留调用配对与思考续聊数据；旧模型 file_context 未配置时继续预加载附件，RAG 默认值保持 3/1000 |
 | 录音便笺全局开关 | 管理员语音设置统一控制，默认关闭 | 保留 `audio.voice_note.enabled` 持久化和前端同步，菜单、快捷键及录音入口一致受控；关闭时停止录制并保留已有草稿 |
 | 运行中消息排队与补充输入 | 支持逐条排队、调整顺序和不中断当前任务的补充要求 | 保留按会话排队、逐轮自动发送、按任务及消息绑定的交付确认与失败保留，以及过程中的补充消息展示 |
+| 模型轮次有限重试与断流判定 | 断流、超时、限流、5xx 或模型回空时自动恢复，避免任务卡死或静默停止 | 保留 `utils/upstream_retry.py` 的 `RetryBudget`（每轮共享 `UPSTREAM_MAX_ATTEMPTS` 默认 5 次，指数退避 `UPSTREAM_RETRY_BASE_DELAY`/`UPSTREAM_RETRY_MAX_DELAY`，遵守 Retry-After）、首轮在 `main.py` 经 `request_with_retry` 发起并通过 `ctx['retry_budget']` 交给流式处理、`stream_round` 统一处理断流与空回合（仅思考也算空，第二次空回复起追加催促），重试前清空本轮输出并 flush；`interrupted` 断流标记、可重试流异常转断流、Anthropic 缺少 message_stop 抛 `StreamInterruptedError`；流式空闲超时 `AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT` 默认 120 秒；直连模型不重试；提示统一在循环结束后经 `round_notice` 发出 |
 
 后续魔改在此表持续登记核心功能、保留原因及同步注意事项。
 
