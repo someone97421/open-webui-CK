@@ -1446,6 +1446,10 @@
 	// Re-lists the shown folders in place: no spinner, and selection and preview stay put.
 	let refreshes = 0;
 	const refreshBrowser = async () => {
+		if (!savedPathLoaded) {
+			await retryWorkspace();
+			return;
+		}
 		const terminal = selectedTerminal;
 		if (!terminal || loading) return;
 		const refresh = ++refreshes;
@@ -1469,15 +1473,6 @@
 		);
 		treeCache = cache;
 		saveTreeState();
-	};
-
-	const refreshBrowser = async () => {
-		if (!savedPathLoaded) {
-			await retryWorkspace();
-			return;
-		}
-		await loadDir(currentPath, { preserveTree: true, syncCwd: false });
-		await refreshExpandedDirs();
 	};
 
 	// The terminal's watcher reports real changes, including ones made outside the chat.

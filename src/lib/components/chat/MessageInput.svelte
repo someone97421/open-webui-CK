@@ -1259,7 +1259,7 @@
 		}
 
 		files = [...files, fileItem];
-		if ($chatMode && !uploadProjectId && !isTemporary) {
+		if ($chatMode && !uploadProjectId && !$temporary) {
 			try {
 				const id = ensureChat ? await ensureChat(uploadHistory) : chatId;
 				await tick();
