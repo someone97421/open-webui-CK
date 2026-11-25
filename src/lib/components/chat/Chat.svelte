@@ -161,6 +161,7 @@
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
+	import { browserRequestContext } from '$lib/utils/browserSidebar';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import Sparkles from '$lib/components/layout/Sidebar/icons/Sparkles.svelte';
@@ -192,6 +193,13 @@
 	$: if (isSavedChatId($chatId)) mainChatHref = `/c/${$chatId}`;
 	export let embedded = false;
 	export let tabbed = false;
+	let browserToolsEnabled = false;
+	let browserToolsChatId = '';
+	$: trackBrowserToolsChat($chatId);
+	function trackBrowserToolsChat(id: string) {
+		if (browserToolsChatId && browserToolsChatId !== id) browserToolsEnabled = false;
+		browserToolsChatId = id;
+	}
 	const chatId = embedded ? writable('') : _chatId;
 	const chatTitle = embedded ? writable('') : _chatTitle;
 	const audioQueue = embedded ? writable<AudioQueue | null>(null) : _audioQueue;
@@ -5241,6 +5249,7 @@
 				skill_ids: skillIds.length > 0 ? skillIds : undefined,
 				attachment_overrides,
 				input_controls: inputControls,
+				...(browserToolsEnabled && !isShared && (!embedded || tabbed) ? browserRequestContext() : {}),
 				terminal_id: terminalEnabled && requestTerminalId ? requestTerminalId : null,
 				terminal_cwd: !_chatId ? requestTerminalCwd : undefined,
 				features: getFeatures(),
@@ -6465,6 +6474,8 @@
 									class=" pb-2 {dragged ? 'z-0' : 'z-10'}"
 								>
 									<MessageInput
+										browserSidebarEnabled={!isShared && (!embedded || tabbed)}
+										bind:browserToolsEnabled
 										{selectedTerminalId}
 										{terminalSkills}
 										{messagesContainerId}
@@ -6589,6 +6600,8 @@
 								{/if}
 								<div id={embedded ? messageInputDropzoneId : undefined} class="pb-2 z-10">
 									<MessageInput
+										browserSidebarEnabled={!isShared && (!embedded || tabbed)}
+										bind:browserToolsEnabled
 										{selectedTerminalId}
 										{terminalSkills}
 										{messagesContainerId}

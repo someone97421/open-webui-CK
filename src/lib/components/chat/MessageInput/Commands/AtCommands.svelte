@@ -17,6 +17,7 @@
 	import { isTemporaryChatId } from '$lib/utils/chatId';
 	import { isProjectModelCompatible } from '$lib/utils/projects';
 	import { defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
+	import { browserSidebar } from '$lib/utils/browserSidebar';
 
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Database from '$lib/components/icons/Database.svelte';
@@ -85,9 +86,20 @@
 		['youtube', 'web'].includes(item.type) ? webUploadEnabled : fileUploadEnabled
 	);
 
+	$: tabQuery = query.toLowerCase();
+	$: filteredBrowserTabs = $browserSidebar.active
+		? $browserSidebar.tabs.filter(
+				(tab) =>
+					tab.kind === 'page' &&
+					((typeof tab.title === 'string' && tab.title.toLowerCase().includes(tabQuery)) ||
+						tab.url.toLowerCase().includes(tabQuery))
+			)
+		: [];
+
 	$: filteredItems = [
 		...knowledgeResults.map((data) => ({ type: data.type, data })),
-		...filteredModels.map((data) => ({ type: 'model', data }))
+		...filteredModels.map((data) => ({ type: 'model', data })),
+		...filteredBrowserTabs.map((data) => ({ type: 'browser-tab', data }))
 	];
 
 	$: if (query) {
@@ -274,8 +286,8 @@
 		const item = filteredItems[selectedIdx];
 		if (!item) return;
 
-		if (item.type === 'model') {
-			onSelect({ type: 'model', data: item.data });
+		if (item.type === 'model' || item.type === 'browser-tab') {
+			onSelect(item);
 		} else {
 			selectKnowledgeItem(item.data);
 		}
@@ -405,6 +417,32 @@
 						{resolveLocalizedModelName(model, $i18n.language)}
 					</div>
 				</div>
+			</button>
+		</Tooltip>
+	{/each}
+{/if}
+
+{#if filteredBrowserTabs.length > 0}
+	<div class="app-muted mb-0.5 px-2 pt-1 pb-0.5 text-[0.625rem] leading-none">
+		浏览器标签页
+	</div>
+
+	{#each filteredBrowserTabs as tab, tabIdx (tab.tabId)}
+		{@const itemIdx = knowledgeResults.length + filteredModels.length + tabIdx}
+		{@const title = (typeof tab.title === 'string' && tab.title.trim()) || tab.url}
+		<Tooltip content={tab.url} placement="top-start">
+			<button
+				class="flex h-6 w-full items-center gap-2 rounded-xl px-2 text-left text-[0.8125rem] transition-colors duration-75 hover:bg-gray-50/40 dark:hover:bg-gray-800/40 {itemIdx ===
+				selectedIdx
+					? 'app-interactive-active selected-command-option-button'
+					: ''}"
+				type="button"
+				on:click={() => onSelect({ type: 'browser-tab', data: tab })}
+				on:mousemove={() => (selectedIdx = itemIdx)}
+				data-selected={itemIdx === selectedIdx}
+			>
+				<GlobeAlt className="app-icon-muted size-3.5 shrink-0" />
+				<span class="min-w-0 truncate">{title}</span>
 			</button>
 		</Tooltip>
 	{/each}

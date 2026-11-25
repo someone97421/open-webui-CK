@@ -154,6 +154,7 @@ from open_webui.routers import (
     apps,
     analytics,
     audio,
+    browse,
     auths,
     automations,
     calendar,
@@ -224,6 +225,7 @@ from open_webui.utils.access_control import has_permission
 from open_webui.utils.access_control.folders import has_folder_write_access
 from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.asgi_middleware import AppHTTPMiddleware, BrowserCORSMiddleware
+from open_webui.utils.browse import BINDING_ID, BrowseManager, configured_origin, require_login_claims
 from open_webui.utils.audit import AuditLevel, AuditLoggingMiddleware
 from open_webui.utils.auth import (
     create_admin_user,
@@ -522,7 +524,12 @@ async def lifespan(app: FastAPI):
     app.state.startup_complete = True
     await publish_event(request, EVENTS.SYSTEM_STARTUP_COMPLETED, source='system')
 
-    yield
+    app.state.browse = BrowseManager(getattr(app.state, 'redis', None))
+    await app.state.browse.start()
+    try:
+        yield
+    finally:
+        await app.state.browse.close()
 
     await publish_event(request, EVENTS.SYSTEM_SHUTDOWN_STARTED, source='system')
     await app_connections.close()
@@ -809,6 +816,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
+    browse_extension_origin=configured_origin(),
 )
 
 
@@ -830,6 +838,7 @@ app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieva
 app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])
 
 app.include_router(auths.router, prefix='/api/v1/auths', tags=['auths'])
+app.include_router(browse.router, prefix='/api/v1/browser', tags=['browser'])
 app.include_router(mfa.router, prefix='/api/v1/auths/mfa', tags=['auths'])
 app.include_router(users.router, prefix='/api/v1/users', tags=['users'])
 
@@ -1083,6 +1092,17 @@ async def chat_completion(
     model_id = form_data.get('model', None)
     request.state.model_id = model_id
     tasks = form_data.pop('background_tasks', None)
+    browser_binding_id = form_data.pop('browser_binding_id', None)
+    browser_tab_id = form_data.pop('browser_tab_id', None)
+    browser_tools = None
+    if browser_binding_id is not None and (
+        not isinstance(browser_binding_id, str) or not BINDING_ID.fullmatch(browser_binding_id)
+    ):
+        raise HTTPException(422, 'Invalid browser_binding_id')
+    if browser_tab_id is not None and (
+        browser_binding_id is None or type(browser_tab_id) is not int or not 0 < browser_tab_id < 2**53
+    ):
+        raise HTTPException(422, 'Invalid browser_tab_id')
 
 
     metadata = {}
@@ -1266,6 +1286,18 @@ async def chat_completion(
                 'model_controls': model_controls,
             },
         }
+
+        if browser_binding_id is not None:
+            if (
+                not form_data.get('stream')
+                or metadata['params']['function_calling'] == 'legacy'
+                or form_data.get('tools') is not None
+            ):
+                raise HTTPException(400, 'Browse requires streaming native tools without a caller-supplied tools list')
+            manager = request.app.state.browse
+            manager.require_enabled()
+            claims = require_login_claims(request, user.id)
+            browser_tools = await manager.tools(user.id, claims['sid'], browser_binding_id, browser_tab_id)
 
         if is_new_chat:
             metadata['chat_id'] = str(uuid4())
@@ -1604,7 +1636,7 @@ async def chat_completion(
                 if metadata.get('assistant_message_id') and not is_saved_chat_id(metadata.get('chat_id')):
                     ctx = await build_chat_response_context(request, form_data, user, model, metadata, tasks, [])
                 form_data, metadata, events, paused = await process_chat_payload(
-                    request, form_data, user, metadata, model
+                    request, form_data, user, metadata, model, browser_tools=browser_tools
                 )
                 if paused:
                     return {'status': True, 'chat_id': metadata.get('chat_id'), 'paused': True}

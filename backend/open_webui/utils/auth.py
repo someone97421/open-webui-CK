@@ -266,7 +266,7 @@ revocation_log = logging.getLogger(f'{__name__}.revocation')
 revocation_log.addFilter(RateLimitFilter())
 
 
-async def is_valid_token(decoded, redis=None) -> bool:
+async def is_valid_token(decoded, redis=None, *, require_revocation_check=False) -> bool:
     """Check persistent account revocation, then optional Redis per-token revocation.
 
     Database failures fail closed. Redis failures retain the existing availability policy.
@@ -326,6 +326,8 @@ async def is_valid_token(decoded, redis=None) -> bool:
                 except (ValueError, TypeError):
                     pass
     except RedisError as e:
+        if require_revocation_check:
+            raise
         revocation_log.warning('Revocation check failed; accepting token: %s', e)
 
     return True
@@ -714,6 +716,7 @@ async def create_session_response(
 
     from open_webui.env import WEBUI_AUTH_COOKIE_SAME_SITE, WEBUI_AUTH_COOKIE_SECURE
     from open_webui.events import EVENTS, publish_event
+    from open_webui.models.auth_sessions import AuthSessions
     from open_webui.utils.access_control import get_permissions
     from open_webui.utils.mfa import get_auth, get_mfa_config, is_mfa_required
 
@@ -724,10 +727,17 @@ async def create_session_response(
         raise HTTPException(401, 'Authenticator verification is required.')
     expires_delta = parse_duration(await Config.get('auth.jwt_expiry'))
     expires_at = int(time.time()) + int(expires_delta.total_seconds()) if expires_delta else None
+    session = await AuthSessions.create(
+        user_id=user.id,
+        refresh_token_id=str(uuid.uuid4()),
+        data={'name': source},
+        expires_at=expires_at if expires_at is not None else 2**63 - 1,
+    )
     token = create_token(
         {
             'id': user.id,
             'typ': 'session',
+            'sid': session.id,
             'auth_method': source,
             'auth_time': auth_time or int(time.time()),
             'session_stamp': auth.session_stamp,

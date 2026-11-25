@@ -63,6 +63,7 @@
 
 	import { getBackendConfig, getModels, getVersion } from '$lib/apis';
 	import { getSessionUser, updateUserTimezone, userSignOut } from '$lib/apis/auths';
+	import { mountBrowserSidebar, setBrowserSidebarUser } from '$lib/utils/browserSidebar';
 	import { getAllTags } from '$lib/apis/chats';
 	import { isTemporaryChatId } from '$lib/utils/chatId';
 	import {
@@ -819,6 +820,13 @@
 			showSyncStatsModal = true;
 		}
 	};
+
+	onMount(() => {
+		const removeBrowserSidebar = mountBrowserSidebar();
+		if (!removeBrowserSidebar) return;
+		const unsubscribe = user.subscribe((account) => setBrowserSidebarUser(account?.id ?? ''));
+		return () => { unsubscribe(); removeBrowserSidebar(); };
+	});
 
 	onMount(async () => {
 		const originalFetch = window.fetch.bind(window);

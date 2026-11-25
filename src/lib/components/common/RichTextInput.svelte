@@ -710,6 +710,16 @@
 		});
 		return nodes;
 	};
+	export const insertLiteralText = (text: string) => {
+		if (!text || !editor?.view || editor.isDestroyed || !editor.isEditable) return false;
+		const { state, view } = editor;
+		view.dispatch(state.tr.replaceSelectionWith(
+			state.schema.nodes.paragraph.create(null, textToNodes(state, text))
+		).scrollIntoView());
+		focus();
+		return true;
+	};
+
 
 	export const replaceVariables = (variables) => {
 		if (!editor || !editor.view) return;

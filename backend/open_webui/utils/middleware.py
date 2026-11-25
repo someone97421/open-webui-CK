@@ -889,7 +889,7 @@ async def process_tool_result(
         tool_result = f'{tool_function_name}: 图片已读取。'
 
     if isinstance(tool_result, list):
-        if tool_type == 'mcp':  # MCP
+        if tool_type in ('mcp', 'browse'):
             tool_response = []
             for item in tool_result:
                 if isinstance(item, dict):
@@ -902,6 +902,13 @@ async def process_tool_result(
                                 pass
                         tool_response.append(text)
                     elif item.get('type') in ['image', 'audio']:
+                        if tool_type == 'browse':
+                            mime_type = item.get('mimeType')
+                            if item['type'] == 'image' and mime_type in ('image/png', 'image/jpeg', 'image/webp'):
+                                tool_result_files.append(
+                                    {'type': 'image', 'url': f'data:{mime_type};base64,{item["data"]}'}
+                                )
+                            continue
                         file_url = await get_file_url_from_base64(
                             request,
                             f'data:{item.get("mimeType")};base64,{item.get("data", item.get("blob", ""))}',
@@ -2115,7 +2122,7 @@ def sanitize_tool_pairs(messages: list[dict]) -> list[dict]:
     return sanitized
 
 
-async def process_chat_payload(request, form_data, user, metadata, model):
+async def process_chat_payload(request, form_data, user, metadata, model, *, browser_tools=None):
     # Ensure chat_id is always a string — external API clients may omit it.
     if not isinstance(metadata.get('chat_id'), str):
         metadata['chat_id'] = ''
@@ -3035,6 +3042,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     tools_dict[name] = {**tools_dict[name], 'file_tool': tool_dict}
 
         await filter_user_terminal_tools(request, user, tools_dict, metadata, extra_params)
+
+        if browser_tools:
+            tools_dict.update(browser_tools)
 
         if tools_dict:
             # Always store resolved tools in metadata so downstream consumers

@@ -8,6 +8,7 @@
 	import { setContext } from 'svelte';
 	import { readable, type Readable } from 'svelte/store';
 	import { defaultAttachmentPolicy, type AttachmentPolicy } from '$lib/utils/skillPolicy';
+	import { insertBrowserTab } from '$lib/utils/browserSidebar';
 	export let attachmentPolicy: Readable<AttachmentPolicy> = readable(defaultAttachmentPolicy);
 	setContext('attachmentPolicy', attachmentPolicy);
 
@@ -35,7 +36,7 @@
 	export let onSettings: () => void = () => {};
 	export let onTemporary: () => void = () => {};
 	export let onCreateSkill: () => void = () => {};
-	export let insertTextHandler: (text: string) => void = () => {};
+	export let insertTextHandler: (text: string) => void | Promise<void> = () => {};
 	export let canCompact: boolean | (() => boolean) = false;
 	export let compactDisabled: boolean | (() => boolean) = false;
 	export let canStatus: boolean | (() => boolean) = false;
@@ -223,10 +224,13 @@
 					{query}
 					fileUploadEnabled={isFileUploadEnabled}
 					bind:filteredItems
-					onSelect={(e) => {
+					onSelect={async (e) => {
 						const { type, data } = e;
 
-						if (type === 'model') {
+						if (type === 'browser-tab') {
+							await insertTextHandler('');
+							insertBrowserTab(data);
+						} else if (type === 'model') {
 							insertTextHandler('');
 
 							onSelect({
