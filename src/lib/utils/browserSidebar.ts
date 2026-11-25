@@ -1,4 +1,5 @@
 import { get, writable } from 'svelte/store';
+import { toast } from 'svelte-sonner';
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -11,8 +12,15 @@ type BrowserBinding = {
 };
 type BrowserTab = { tabId: number; title: string; url: string; kind: 'page' };
 type BrowserContext = { tabId?: number; relayTabId?: number; title?: string; url?: string };
-type Reference = { tabId: number; text: string };
-type Composer = { key: string; focus: () => void; insert: (reference: Reference) => boolean };
+export type BrowserReference = {
+	kind: 'page' | 'selection' | 'element';
+	tabId: number;
+	title: string;
+	url: string;
+	preview: string;
+	text: string;
+};
+type Composer = { key: string; focus: () => void; insert: (reference: BrowserReference) => boolean };
 
 type SidebarState = {
 	active: boolean;
@@ -37,6 +45,7 @@ let bindingAuthToken = '';
 let pendingBindingRefresh: string | undefined;
 let composer: Composer | undefined;
 let initialDraftKey = '';
+let pickerResultSession: string | undefined;
 const pending = new Map<string, (result: string) => void>();
 
 function post(type: string, fields: Record<string, unknown> = {}) {
@@ -60,6 +69,7 @@ function clearBinding() {
 	binding = undefined;
 	bindingAuthToken = '';
 	pendingBindingRefresh = undefined;
+	pickerResultSession = undefined;
 	browserSidebar.set({ ...emptyState, active: !!parentOrigin });
 }
 
@@ -125,30 +135,29 @@ async function bind({ renew = false, expectedBindingId }: { renew?: boolean; exp
 	}
 }
 
-function pageText(title: unknown, url: unknown) {
-	if (typeof url !== 'string') return '';
-	try {
-		if (!['https:', 'http:'].includes(new URL(url).protocol)) return '';
-	} catch { return ''; }
-	const label = typeof title === 'string' ? title.slice(0, 256) : '';
-	return `${label ? `${label} ` : ''}${url.slice(0, 2048)}`;
-}
-
-function parseReference(value: unknown): Reference | undefined {
+function parseReference(value: unknown): BrowserReference | undefined {
 	if (!value || typeof value !== 'object') return;
 	const ref = value as Record<string, unknown>;
-	const page = pageText(ref.title, ref.url);
-	if (!page || typeof ref.tabId !== 'number' || !Number.isSafeInteger(ref.tabId)) return;
-	if (ref.kind === 'page') return { tabId: ref.tabId, text: `网页引用：${page}` };
-	if (ref.kind === 'selection' && typeof ref.selection === 'string') {
-		return { tabId: ref.tabId, text: `网页选文：${page}\n${ref.selection.slice(0, 12000)}` };
+	const { tabId, kind } = ref;
+	if (typeof tabId !== 'number' || !Number.isSafeInteger(tabId) || typeof ref.url !== 'string') return;
+	try {
+		if (!['https:', 'http:'].includes(new URL(ref.url).protocol)) return;
+	} catch { return; }
+	const title = typeof ref.title === 'string' ? ref.title.slice(0, 256) : '';
+	const url = ref.url.slice(0, 2048);
+	const page = `${title ? `${title} ` : ''}${url}`;
+	const base = { tabId, title, url };
+	if (kind === 'page') return { ...base, kind, preview: url, text: `网页引用：${page}` };
+	if (kind === 'selection' && typeof ref.selection === 'string') {
+		const selection = ref.selection.slice(0, 12000);
+		return { ...base, kind, preview: `${url}\n\n${selection}`, text: `网页选文：${page}\n${selection}` };
 	}
-	if (ref.kind === 'element' && ref.element && typeof ref.element === 'object') {
+	if (kind === 'element' && ref.element && typeof ref.element === 'object') {
 		const element = ref.element as Record<string, unknown>;
 		const details = [element.locator, element.text, element.html]
 			.filter((value): value is string => typeof value === 'string')
 			.map((value) => value.slice(0, 4000)).join('\n');
-		return { tabId: ref.tabId, text: `网页元素：${page}\n${details}` };
+		return { ...base, kind, preview: `${url}\n\n${details}`, text: `网页元素：${page}\n${details}` };
 	}
 }
 
@@ -171,6 +180,8 @@ export function requestBrowserAction(method: 'toggleAttach' | 'insertCurrent' | 
 }
 
 export function sendElementPicker(action: 'start' | 'end', sessionId: string) {
+	if (!parentOrigin) return;
+	if (action === 'start') pickerResultSession = sessionId;
 	post('element-picker', { action, sessionId });
 }
 
@@ -218,6 +229,12 @@ function receive(event: MessageEvent) {
 			requestId: data.requestId, ok,
 			...(ok ? { result: { inserted: true, clientId: data.requestId, draftKey: target?.key } } : { error: '当前对话输入框不可用。' })
 		});
+	} else if (data.type === 'openwebui:element-picker-result') {
+		if (!pickerResultSession || data.sessionId !== pickerResultSession || typeof data.ok !== 'boolean') return;
+		pickerResultSession = undefined;
+		if (!data.ok) {
+			toast.error(typeof data.error === 'string' && data.error ? data.error : '网页元素引用失败，请重试。');
+		}
 	} else if (data.type === 'openwebui:browse-response') {
 		const done = pending.get(data.requestId);
 		pending.delete(data.requestId);

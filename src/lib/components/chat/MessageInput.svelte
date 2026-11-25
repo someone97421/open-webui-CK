@@ -565,6 +565,12 @@
 		chatInputElement?.focus(options);
 	};
 
+	export const getBrowserReferenceDraft = (text: string) =>
+		chatInputElement?.getBrowserReferenceDraft(text);
+
+	export const restoreBrowserReferenceDraft = (content) =>
+		chatInputElement?.restoreBrowserReferenceDraft(content) ?? false;
+
 	export const setText = (text: string = '') => {
 		chatInputElement?.setText(text);
 		if (!$mobile && !$voiceCall) {
@@ -851,7 +857,7 @@
 		unregisterBrowserComposer = active && editor ? registerBrowserComposer({
 			key,
 			focus: () => editor.focus({ preventScroll: true }),
-			insert: ({ text }) => editor.insertLiteralText(text)
+			insert: (reference) => editor.insertBrowserReference(reference)
 		}) : undefined;
 	}
 	onDestroy(() => { unregisterBrowserComposer?.(); endBrowserPicker(); });
@@ -2559,26 +2565,33 @@
 							{/if}
 
 							{#if browserSidebarEnabled && $browserSidebar.active}
-								<div class="flex flex-wrap items-center gap-1.5 px-3 pt-2 text-xs">
-									<button type="button" class={browserButton} aria-pressed={browserToolsEnabled}
-										disabled={!$browserSidebar.bindingId} on:click={() => (browserToolsEnabled = !browserToolsEnabled)}>
-										{browserToolsEnabled ? '浏览器工具已启用' : '启用浏览器工具'}
-									</button>
-									<button type="button" class={browserButton} disabled={!$browserSidebar.bindingId || $browserSidebar.busy}
-										on:click={() => runBrowserAction('toggleAttach')}>
-										{$browserSidebar.borrowed ? '结束当前页调试' : '接管当前页'}
-									</button>
+								<div aria-label="浏览器工具" role="group" class="flex flex-wrap items-center gap-1 px-3 pt-2 text-xs">
+									<Tooltip content={$browserSidebar.bindingId ? '拖到网页元素上，松开后引用该元素' : ($browserSidebar.error || '等待浏览器连接')}>
+										<button type="button" class={`${browserButton} inline-flex items-center gap-1.5 bg-gray-100 dark:bg-gray-800 enabled:cursor-grab enabled:active:cursor-grabbing`}
+											disabled={!$browserSidebar.bindingId} draggable={!!$browserSidebar.bindingId}
+											on:dragstart={startBrowserPicker} on:dragend={endBrowserPicker}>
+											<svg class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+												<circle cx="12" cy="12" r="7" /><path d="M12 2v6m0 8v6M2 12h6m8 0h6" />
+											</svg>
+											拖拽拾取 DOM
+										</button>
+									</Tooltip>
 									<button type="button" class={browserButton} disabled={!$browserSidebar.bindingId || $browserSidebar.busy}
 										on:click={() => runBrowserAction('insertCurrent')}>引用当前页</button>
-									<button type="button" class={browserButton} disabled={!$browserSidebar.bindingId}
-										title="拖到网页元素上" draggable={$browserSidebar.bindingId !== ''}
-										on:dragstart={startBrowserPicker} on:dragend={endBrowserPicker}>拾取元素</button>
+									<button type="button" class={browserButton} disabled={!$browserSidebar.bindingId || $browserSidebar.busy}
+										on:click={() => runBrowserAction('toggleAttach')}>
+										{$browserSidebar.borrowed ? '结束调试' : '接管当前页'}
+									</button>
+									<button type="button" class={browserButton} aria-pressed={browserToolsEnabled}
+										disabled={!$browserSidebar.bindingId} on:click={() => (browserToolsEnabled = !browserToolsEnabled)}>
+										{browserToolsEnabled ? '工具已启用' : '启用工具'}
+									</button>
 									{#if $browserSidebar.handoff}
 										<button type="button" class={browserButton} disabled={$browserSidebar.busy}
 											on:click={() => runBrowserAction('handoff')}>继续</button>
 									{/if}
 									{#if $browserSidebar.error}
-										<span role="status" class="text-red-500">{$browserSidebar.error}</span>
+										<span role="status" class="w-full text-red-500">{$browserSidebar.error}</span>
 									{/if}
 								</div>
 							{/if}

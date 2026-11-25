@@ -1176,7 +1176,9 @@
 		try {
 			const input = JSON.parse(storageChatInput);
 			prompt = input.prompt ?? '';
-			messageInput?.setText(prompt);
+			if (!messageInput?.restoreBrowserReferenceDraft(input.browserReferenceDraft)) {
+				messageInput?.setText(prompt);
+			}
 			files = input.files ?? [];
 			if (restoreSettings && (!input.folder_defaults_key || input.folder_defaults_key === folderDefaultsKey($selectedFolder))) {
 				if (Array.isArray(input.models)) selectedModels = normalizeSelectedModels(input.models);
@@ -5803,6 +5805,7 @@
 
 	const saveDraft = async (draft: any, targetChatId: string | null = null, debounce = true) => {
 		const draftChatId = $chatId;
+		const browserReferenceDraft = messageInput?.getBrowserReferenceDraft(draft.prompt);
 		const key = targetChatId ? getChatInputKey(targetChatId) : getNewChatDraftKey();
 		const snapshot = {
 			models: [...selectedModels],
@@ -5824,6 +5827,7 @@
 		if (draft.prompt !== null && draft.prompt.length < MAX_DRAFT_LENGTH) {
 			const savedDraft = {
 				...draft,
+				browserReferenceDraft,
 				folder_defaults_key: snapshot.defaultsKey,
 				models: snapshot.models,
 				...snapshot.controls,

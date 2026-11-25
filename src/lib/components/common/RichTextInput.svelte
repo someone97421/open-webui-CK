@@ -4,6 +4,11 @@
 	import { toast } from 'svelte-sonner';
 	import { copyToClipboard } from '$lib/utils';
 	import { equalEditorJSON } from '$lib/utils/editorJson';
+	import type { BrowserReference } from '$lib/utils/browserSidebar';
+	import BrowserReferenceNode, {
+		browserReferenceNodeName,
+		readBrowserReference
+	} from './RichTextInput/BrowserReference';
 	import { mobile, voiceCall, skills, terminalSkills } from '$lib/stores';
 
 	marked.use({
@@ -122,6 +127,15 @@
 			const ch = node.getAttribute('data-mention-suggestion-char') || '@';
 			const mentionChar = ch === '/' ? '$' : ch;
 			return `<${mentionChar}${id}>`;
+		}
+	});
+
+	let serializeBrowserReference = (text: string) => text;
+	turndownService.addRule('browserReferences', {
+		filter: (node) => node.nodeName === 'SPAN' && node.hasAttribute('data-browser-reference'),
+		replacement: (content, node: HTMLElement) => {
+			const reference = readBrowserReference(node);
+			return reference ? serializeBrowserReference(reference.text) : content;
 		}
 	});
 
@@ -374,25 +388,25 @@
 		return `${char}${label}`;
 	};
 
-	// Plain-text mode still preserves mention identities from the clipboard's HTML.
-	const plainMentionPaste = (slice: Slice, schema: Schema): Fragment | null => {
+	// Plain-text mode keeps inline entities from the clipboard's HTML.
+	const plainInlineEntityPaste = (slice: Slice, schema: Schema): Fragment | null => {
 		const nodes: Node[] = [];
-		let hasMention = false;
+		let hasInlineEntity = false;
 		let firstBlock = true;
 		slice.content.descendants((node) => {
 			if (node.isTextblock) {
 				if (!firstBlock) nodes.push(schema.nodes.hardBreak.create());
 				firstBlock = false;
 			}
-			if (node.type.name === 'mention') {
-				hasMention = true;
+			if (node.type.name === 'mention' || node.type.name === browserReferenceNodeName) {
+				hasInlineEntity = true;
 				nodes.push(node.mark([]));
 				return false;
 			}
 			if (node.isText) nodes.push(schema.text(node.text!));
 			else if (node.type.name === 'hardBreak') nodes.push(node.mark([]));
 		});
-		return hasMention ? Fragment.fromArray(nodes) : null;
+		return hasInlineEntity ? Fragment.fromArray(nodes) : null;
 	};
 
 	export let onSelectionUpdate = (e) => {};
@@ -440,27 +454,30 @@
 		htmlValue = editor.getHTML();
 		jsonValue = editor.getJSON();
 
-		if (richText) {
-			mdValue = turndownService
-				.turndown(
-					htmlValue
-						.replace(/<p><\/p>/g, '<br/>')
-						.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
-				)
-				.replace(/\u00a0/g, ' ');
-		} else {
-			mdValue = turndownService
-				.turndown(
-					htmlValue
-						// Replace empty paragraphs with line breaks
-						.replace(/<p><\/p>/g, '<br/>')
-						// Replace multiple spaces with non-breaking spaces
-						.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
-						// Replace tabs with non-breaking spaces (preserve indentation)
-						.replace(/\t/g, '\u00a0\u00a0\u00a0\u00a0') // 1 tab = 4 spaces
-				)
-				// Convert non-breaking spaces back to regular spaces for markdown
-				.replace(/\u00a0/g, ' ');
+		let htmlForMarkdown = htmlValue
+			.replace(/<p><\/p>/g, '<br/>')
+			.replace(/ {2,}/g, (spaces) => spaces.replace(/ /g, '\u00a0'));
+		if (!richText) htmlForMarkdown = htmlForMarkdown.replace(/\t/g, '\u00a0'.repeat(4));
+
+		// Expand the literal payload after Markdown conversion so whitespace and source HTML survive.
+		const references: string[] = [];
+		let marker = '\uE000browserReference';
+		while (htmlForMarkdown.includes(marker)) marker += '_';
+		serializeBrowserReference = (text) => `${marker}${references.push(text) - 1}\uE001`;
+		try {
+			mdValue = turndownService.turndown(htmlForMarkdown).replace(/\u00a0/g, ' ');
+			if (references.length) {
+				mdValue = mdValue.replace(
+					new RegExp(`${marker}(\\d+)\uE001`, 'g'),
+					(match, index, offset, source) => {
+						const before = offset > 0 && source[offset - 1] !== '\n' ? '\n\n' : '';
+						const after = offset + match.length < source.length ? '\n\n' : '';
+						return `${before}${references[Number(index)]}${after}`;
+					}
+				);
+			}
+		} finally {
+			serializeBrowserReference = (text) => text;
 		}
 	};
 
@@ -721,6 +738,19 @@
 	};
 
 
+	export const insertBrowserReference = (reference: BrowserReference) => {
+		if (!editor?.view || editor.isDestroyed || !editor.isEditable) return false;
+		const { state, view } = editor;
+		const nodeType = state.schema.nodes[browserReferenceNodeName];
+		if (!nodeType) return false;
+		const node = nodeType.create({ reference });
+		const transaction = state.tr.replaceSelectionWith(node, false);
+		if (!transaction.docChanged) return false;
+		view.dispatch(transaction.scrollIntoView());
+		focus();
+		return true;
+	};
+
 	export const replaceVariables = (variables) => {
 		if (!editor || !editor.view) return;
 		const { state, view } = editor;
@@ -843,6 +873,24 @@
 		}
 		return false;
 	}
+
+	export const getBrowserReferenceDraft = (text: string) => {
+		if (!editor || editor.isDestroyed || text !== mdValue) return undefined;
+		let hasReference = false;
+		editor.state.doc.descendants((node) => {
+			if (node.type.name === browserReferenceNodeName) hasReference = true;
+		});
+		return hasReference ? editor.getJSON() : undefined;
+	};
+
+	export const restoreBrowserReferenceDraft = (content) => {
+		if (!editor || editor.isDestroyed || !messageInput || content?.type !== 'doc') return false;
+		try {
+			return editor.commands.setContent(content, { errorOnInvalidContent: true });
+		} catch {
+			return false;
+		}
+	};
 
 	export const setContent = (content) => {
 		editor.commands.setContent(content);
@@ -970,6 +1018,7 @@
 			element: element,
 			extensions: [
 				...extensions,
+				...(messageInput ? [BrowserReferenceNode] : []),
 				StarterKit.configure({
 					link: link ? { autolink: autoFormat, linkOnPaste: autoFormat } : false,
 					code: false, // Disabled in favor of FixedCode (see workaround above)
@@ -1224,11 +1273,11 @@
 							return true;
 						}
 
-						const mentions = plainMentionPaste(slice, state.schema);
-						if (mentions) {
+						const inlineEntities = plainInlineEntityPaste(slice, state.schema);
+						if (inlineEntities) {
 							dispatch(
 								state.tr
-									.replaceWith(state.selection.from, state.selection.to, mentions)
+									.replaceWith(state.selection.from, state.selection.to, inlineEntities)
 									.setMeta('paste', true)
 									.scrollIntoView()
 							);
