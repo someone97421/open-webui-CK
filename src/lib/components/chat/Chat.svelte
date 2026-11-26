@@ -6690,6 +6690,8 @@
 									: 'items-center'}"
 							>
 								<Placeholder
+									browserSidebarEnabled={!isShared && (!embedded || tabbed)}
+									bind:browserToolsEnabled
 									{selectedFolder}
 									bind:folderTabActions
 									{selectedTerminalId}

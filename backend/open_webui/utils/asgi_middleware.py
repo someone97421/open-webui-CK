@@ -50,16 +50,16 @@ log = logging.getLogger(__name__)
 
 
 class BrowserCORSMiddleware(CORSMiddleware):
-    def __init__(self, app, *, browse_extension_origin=None, **kwargs):
+    def __init__(self, app, *, browse_extension_origins=None, **kwargs):
         super().__init__(app, **kwargs)
         self.browse_cors = (
             CORSMiddleware(
                 app,
-                allow_origins=[browse_extension_origin],
+                allow_origins=browse_extension_origins,
                 allow_methods=['DELETE'],
                 allow_headers=['Authorization'],
             )
-            if browse_extension_origin
+            if browse_extension_origins
             else None
         )
 

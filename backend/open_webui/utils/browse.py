@@ -38,9 +38,9 @@ BROWSE_TOOLS = {
 }
 
 
-def configured_origin():
-    value = os.getenv(EXTENSION_ORIGIN, '')
-    return value if re.fullmatch(r'chrome-extension://[a-p]{32}', value) else None
+def configured_origins():
+    origins = [origin.strip() for origin in os.getenv(EXTENSION_ORIGIN, '').split(',')]
+    return tuple(dict.fromkeys(origin for origin in origins if re.fullmatch(r'chrome-extension://[a-p]{32}', origin)))
 
 
 def require_login_claims(request, user_id):
@@ -129,7 +129,7 @@ class BrowseManager:
     def __init__(self, redis=None):
         self.redis = redis
         self.binary = os.getenv('BROWSE_BINARY', '').strip()
-        self.origin = configured_origin()
+        self.origins = configured_origins()
         self.session = None
         self.bindings = {}
         self.devices = {}
@@ -140,10 +140,10 @@ class BrowseManager:
 
     async def start(self):
         if multiple_workers_configured():
-            if self.binary and self.origin:
+            if self.binary and self.origins:
                 log.warning('Browse requires a single WebUI worker and has been disabled')
             return
-        if self.binary and self.origin:
+        if self.binary and self.origins:
             self.session = aiohttp.ClientSession(trust_env=False)
             self.sweeper = asyncio.create_task(self.sweep())
 

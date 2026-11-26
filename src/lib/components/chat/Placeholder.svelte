@@ -35,6 +35,8 @@
 	export let autoScroll = false;
 	export let callActive = false;
 	export let callEnabled = true;
+	export let browserSidebarEnabled = false;
+	export let browserToolsEnabled = false;
 
 	export let atSelectedModel: Model | undefined;
 	export let selectedModels: [''];
@@ -122,6 +124,8 @@
 
 {#snippet composer(placeholder = '')}
 	<MessageInput
+		{browserSidebarEnabled}
+		bind:browserToolsEnabled
 		{selectedTerminalId}
 		{terminalSkills}
 		{chatId}

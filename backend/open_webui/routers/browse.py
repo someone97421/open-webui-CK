@@ -38,7 +38,7 @@ async def bind_browser(
     manager.require_enabled()
     if auth is None or getattr(request.state, 'auth_type', None) != 'jwt':
         raise HTTPException(401, 'Open WebUI Bearer token is required')
-    if form.extensionOrigin != manager.origin:
+    if form.extensionOrigin not in manager.origins:
         raise HTTPException(403, 'browse_origin_denied')
     claims = require_login_claims(request, user.id)
     binding, pair_code = await manager.bind(user.id, form.deviceId, claims)
@@ -96,7 +96,7 @@ async def relay_to_extension(upstream, websocket):
 async def browser_socket(websocket: WebSocket, binding_id: str):
     manager = websocket.app.state.browse
     origin = websocket.headers.get('origin')
-    if manager.session is None or manager.closed or origin != manager.origin or not BINDING_ID.fullmatch(binding_id):
+    if manager.session is None or manager.closed or origin not in manager.origins or not BINDING_ID.fullmatch(binding_id):
         await websocket.close(code=1008)
         return
 
