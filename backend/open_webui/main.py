@@ -225,7 +225,7 @@ from open_webui.utils.access_control import has_permission
 from open_webui.utils.access_control.folders import has_folder_write_access
 from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.asgi_middleware import AppHTTPMiddleware, BrowserCORSMiddleware
-from open_webui.utils.browse import BINDING_ID, BrowseManager, configured_origins, require_login_claims
+from open_webui.utils.browse import BINDING_ID, BrowseManager, require_login_claims
 from open_webui.utils.audit import AuditLevel, AuditLoggingMiddleware
 from open_webui.utils.auth import (
     create_admin_user,
@@ -816,7 +816,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
-    browse_extension_origins=configured_origins(),
 )
 
 

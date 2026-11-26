@@ -83,7 +83,7 @@ async function bind({ renew = false, expectedBindingId }: { renew?: boolean; exp
 		const response = await fetch(`${WEBUI_API_BASE_URL}/browser/bind`, {
 			method: 'POST', signal: request.signal,
 			headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
-			body: JSON.stringify({ deviceId, extensionOrigin: parentOrigin })
+			body: JSON.stringify({ deviceId })
 		});
 		if (!response.ok) {
 			const detail = (await response.json().catch(() => null))?.detail;

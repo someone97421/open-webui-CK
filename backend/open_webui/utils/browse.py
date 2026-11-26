@@ -18,7 +18,6 @@ from open_webui.utils.auth import get_verified_user_by_id, is_valid_token
 
 log = logging.getLogger(__name__)
 
-EXTENSION_ORIGIN = 'BROWSE_EXTENSION_ORIGIN'
 BINDING_ID = re.compile(r'[A-Za-z0-9_-]{43}')
 SOCKET_PROTOCOL = 'openwebui-browse.'
 PAIR_WINDOW = 5 * 60
@@ -36,11 +35,6 @@ BROWSE_TOOLS = {
     'eval', 'emulate', 'webmcp',
     *HANDOFF_TOOLS,
 }
-
-
-def configured_origins():
-    origins = [origin.strip() for origin in os.getenv(EXTENSION_ORIGIN, '').split(',')]
-    return tuple(dict.fromkeys(origin for origin in origins if re.fullmatch(r'chrome-extension://[a-p]{32}', origin)))
 
 
 def require_login_claims(request, user_id):
@@ -129,7 +123,6 @@ class BrowseManager:
     def __init__(self, redis=None):
         self.redis = redis
         self.binary = os.getenv('BROWSE_BINARY', '').strip()
-        self.origins = configured_origins()
         self.session = None
         self.bindings = {}
         self.devices = {}
@@ -140,10 +133,10 @@ class BrowseManager:
 
     async def start(self):
         if multiple_workers_configured():
-            if self.binary and self.origins:
+            if self.binary:
                 log.warning('Browse requires a single WebUI worker and has been disabled')
             return
-        if self.binary and self.origins:
+        if self.binary:
             self.session = aiohttp.ClientSession(trust_env=False)
             self.sweeper = asyncio.create_task(self.sweep())
 

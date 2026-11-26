@@ -50,24 +50,20 @@ log = logging.getLogger(__name__)
 
 
 class BrowserCORSMiddleware(CORSMiddleware):
-    def __init__(self, app, *, browse_extension_origins=None, **kwargs):
+    def __init__(self, app, **kwargs):
         super().__init__(app, **kwargs)
-        self.browse_cors = (
-            CORSMiddleware(
-                app,
-                allow_origins=browse_extension_origins,
-                allow_methods=['DELETE'],
-                allow_headers=['Authorization'],
-            )
-            if browse_extension_origins
-            else None
+        self.browse_cors = CORSMiddleware(
+            app,
+            allow_origin_regex=r'chrome-extension://[a-p]{32}',
+            allow_methods=['DELETE'],
+            allow_headers=['Authorization'],
         )
 
     async def __call__(self, scope, receive, send):
         # Sandboxed pages have an opaque origin; capability routes handle their own CORS.
         if re.match(r'^/api/v1/terminals/[^/]+/browser/view/', scope.get('path', '')):
             await self.app(scope, receive, send)
-        elif self.browse_cors and scope['type'] == 'http' and re.fullmatch(
+        elif scope['type'] == 'http' and re.fullmatch(
             r'/api/v1/browser/bind/[A-Za-z0-9_-]{43}', scope.get('path', '')
         ):
             await self.browse_cors(scope, receive, send)
