@@ -869,7 +869,7 @@
 	function startBrowserPicker(event: DragEvent) {
 		if (!event.dataTransfer || !$browserSidebar.bindingId) return;
 		browserPickSession = uuidv4();
-		event.dataTransfer.setData(`application/x-browse-element-${browserPickSession}`, browserPickSession);
+		event.dataTransfer.setData(`${$browserSidebar.pickerDragPrefix}${browserPickSession}`, browserPickSession);
 		event.dataTransfer.effectAllowed = 'copy';
 		sendElementPicker('start', browserPickSession);
 	}

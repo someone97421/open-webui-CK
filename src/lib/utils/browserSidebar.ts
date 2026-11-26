@@ -5,6 +5,8 @@ import { v4 as uuidv4 } from 'uuid';
 
 const extensionOrigin = /^chrome-extension:\/\/[a-p]{32}$/;
 const identifier = /^[a-zA-Z0-9_-]{16,128}$/;
+const openWebUIPickerDragPrefix = 'application/x-openwebui-browse-element-';
+const legacyPickerDragPrefix = 'application/x-browse-element-';
 
 type BrowserBinding = {
 	bindingId: string; socketToken: string; pairCode: string; userId: string; relayPort: number;
@@ -26,6 +28,7 @@ type SidebarState = {
 	active: boolean;
 	bindingId: string;
 	busy: boolean;
+	pickerDragPrefix: string;
 	borrowed: boolean;
 	handoff: boolean;
 	context: BrowserContext | null;
@@ -33,7 +36,7 @@ type SidebarState = {
 	error: string;
 };
 const emptyState: SidebarState = {
-	active: false, bindingId: '', busy: false, borrowed: false, handoff: false, context: null, tabs: [], error: ''
+	active: false, bindingId: '', busy: false, pickerDragPrefix: legacyPickerDragPrefix, borrowed: false, handoff: false, context: null, tabs: [], error: ''
 };
 export const browserSidebar = writable<SidebarState>(emptyState);
 let parentOrigin = '';
@@ -70,7 +73,7 @@ function clearBinding() {
 	bindingAuthToken = '';
 	pendingBindingRefresh = undefined;
 	pickerResultSession = undefined;
-	browserSidebar.set({ ...emptyState, active: !!parentOrigin });
+	browserSidebar.set({ ...emptyState, active: !!parentOrigin && !!deviceId });
 }
 
 async function bind({ renew = false, expectedBindingId }: { renew?: boolean; expectedBindingId?: string } = {}) {
@@ -190,7 +193,9 @@ function receive(event: MessageEvent) {
 	const data = event.data;
 	if (data.type === 'openwebui:status-request' && typeof data.deviceId === 'string' && identifier.test(data.deviceId)) {
 		if (deviceId && deviceId !== data.deviceId) return;
+		const firstHandshake = !deviceId;
 		deviceId = data.deviceId;
+		if (firstHandshake) browserSidebar.set({ ...emptyState, active: true });
 		if (binding && localStorage.getItem('token') !== bindingAuthToken) clearBinding();
 		status();
 		const expectedBindingId = typeof data.expectedBindingId === 'string' && identifier.test(data.expectedBindingId)
@@ -203,6 +208,8 @@ function receive(event: MessageEvent) {
 		const connected = !!binding && data.bindingId === binding.bindingId;
 		browserSidebar.update((value) => ({
 			...value, bindingId: connected ? binding!.bindingId : '', busy: data.busy === true,
+			pickerDragPrefix: connected && data.pickerDragPrefix === openWebUIPickerDragPrefix
+				? openWebUIPickerDragPrefix : legacyPickerDragPrefix,
 			borrowed: connected && data.borrowed === true, handoff: connected && data.handoff === true,
 			context: connected ? data.browserContext ?? null : null,
 			tabs: connected ? value.tabs : [],
@@ -250,7 +257,6 @@ export function mountBrowserSidebar() {
 	if (!origin || !extensionOrigin.test(origin)) return;
 	parentOrigin = origin;
 	sessionStorage.setItem('openwebui:browse-parent', origin);
-	browserSidebar.set({ ...emptyState, active: true });
 	window.addEventListener('message', receive);
 	status();
 	return () => {
