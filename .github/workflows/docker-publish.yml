@@ -31,7 +31,6 @@ jobs:
           images: someone97/open-webui-ck
           tags: |
             type=raw,value=latest
-            type=sha
 
       - uses: docker/build-push-action@v6
         with:

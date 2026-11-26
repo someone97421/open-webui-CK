@@ -105,7 +105,7 @@
 	import SkillsModal from './SkillsModal.svelte';
 
 	import RichTextInput from '../common/RichTextInput.svelte';
-	import { browserSidebar, registerBrowserComposer, requestBrowserAction, sendElementPicker } from '$lib/utils/browserSidebar';
+	import { browserSidebar, registerBrowserComposer } from '$lib/utils/browserSidebar';
 	import Tooltip from '../common/Tooltip.svelte';
 	import FileItem from '../common/FileItem.svelte';
 	import Image from '../common/Image.svelte';
@@ -187,7 +187,6 @@
 	export let chatId = '';
 	export let inputId = 'chat-input';
 	export let browserSidebarEnabled = false;
-	export let browserToolsEnabled = false;
 	export let messagesContainerId = 'messages-container';
 	export let onTemporaryChange: ((value: boolean) => void) | null = null;
 	export let terminalContext: TerminalContext | null = null;
@@ -842,9 +841,7 @@
 
 	let chatInputContainerElement;
 	let chatInputElement: RichTextInput;
-	const browserButton = 'rounded-lg px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40';
 	let unregisterBrowserComposer: (() => void) | undefined;
-	let browserPickSession = '';
 	let registeredBrowserEditor: RichTextInput | undefined;
 	let registeredBrowserKey = '';
 	$: bindBrowserComposer(browserSidebarEnabled && $browserSidebar.active, chatInputElement, chatId, inputId);
@@ -860,24 +857,7 @@
 			insert: (reference) => editor.insertBrowserReference(reference)
 		}) : undefined;
 	}
-	onDestroy(() => { unregisterBrowserComposer?.(); endBrowserPicker(); });
-	async function runBrowserAction(action: 'toggleAttach' | 'insertCurrent' | 'handoff') {
-		const error = await requestBrowserAction(action);
-		if (error) toast.error(error);
-		else if (action === 'toggleAttach') browserToolsEnabled = $browserSidebar.borrowed;
-	}
-	function startBrowserPicker(event: DragEvent) {
-		if (!event.dataTransfer || !$browserSidebar.bindingId) return;
-		browserPickSession = uuidv4();
-		event.dataTransfer.setData(`${$browserSidebar.pickerDragPrefix}${browserPickSession}`, browserPickSession);
-		event.dataTransfer.effectAllowed = 'copy';
-		sendElementPicker('start', browserPickSession);
-	}
-	function endBrowserPicker() {
-		if (!browserPickSession) return;
-		sendElementPicker('end', browserPickSession);
-		browserPickSession = '';
-	}
+	onDestroy(() => unregisterBrowserComposer?.());
 	let modelSelector;
 
 	let filesInputElement;
@@ -2564,37 +2544,6 @@
 								</div>
 							{/if}
 
-							{#if browserSidebarEnabled && $browserSidebar.active}
-								<div aria-label="浏览器工具" role="group" class="flex flex-wrap items-center gap-1 px-3 pt-2 text-xs">
-									<Tooltip content={$browserSidebar.bindingId ? '拖到网页元素上，松开后引用该元素' : ($browserSidebar.error || '等待浏览器连接')}>
-										<button type="button" class={`${browserButton} inline-flex items-center gap-1.5 bg-gray-100 dark:bg-gray-800 enabled:cursor-grab enabled:active:cursor-grabbing`}
-											disabled={!$browserSidebar.bindingId} draggable={!!$browserSidebar.bindingId}
-											on:dragstart={startBrowserPicker} on:dragend={endBrowserPicker}>
-											<svg class="size-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
-												<circle cx="12" cy="12" r="7" /><path d="M12 2v6m0 8v6M2 12h6m8 0h6" />
-											</svg>
-											拖拽拾取 DOM
-										</button>
-									</Tooltip>
-									<button type="button" class={browserButton} disabled={!$browserSidebar.bindingId || $browserSidebar.busy}
-										on:click={() => runBrowserAction('insertCurrent')}>引用当前页</button>
-									<button type="button" class={browserButton} disabled={!$browserSidebar.bindingId || $browserSidebar.busy}
-										on:click={() => runBrowserAction('toggleAttach')}>
-										{$browserSidebar.borrowed ? '结束调试' : '接管当前页'}
-									</button>
-									<button type="button" class={browserButton} aria-pressed={browserToolsEnabled}
-										disabled={!$browserSidebar.bindingId} on:click={() => (browserToolsEnabled = !browserToolsEnabled)}>
-										{browserToolsEnabled ? '工具已启用' : '启用工具'}
-									</button>
-									{#if $browserSidebar.handoff}
-										<button type="button" class={browserButton} disabled={$browserSidebar.busy}
-											on:click={() => runBrowserAction('handoff')}>继续</button>
-									{/if}
-									{#if $browserSidebar.error}
-										<span role="status" class="w-full text-red-500">{$browserSidebar.error}</span>
-									{/if}
-								</div>
-							{/if}
 							<div class="px-2 relative">
 								{#if prompt.split('\n').length > 2}
 									<button
